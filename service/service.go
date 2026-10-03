@@ -17,6 +17,7 @@ import (
 	"errors"
 	"sync/atomic"
 
+	"github.com/xingjianluo/code-index-service-go/graph"
 	"github.com/xingjianluo/code-index-service-go/indexer"
 	"github.com/xingjianluo/code-index-service-go/model"
 	"github.com/xingjianluo/code-index-service-go/retrieval"
@@ -34,13 +35,14 @@ type Service struct {
 	idx      *indexer.Indexer
 	st       *store.Store
 	engine   *retrieval.Engine
+	graph    *graph.Engine
 	current  atomic.Pointer[model.Snapshot]
 	indexing atomic.Bool
 }
 
 // New creates a Service and loads the last committed snapshot if present.
 func New(idx *indexer.Indexer, st *store.Store, engine *retrieval.Engine) (*Service, error) {
-	s := &Service{idx: idx, st: st, engine: engine}
+	s := &Service{idx: idx, st: st, engine: engine, graph: graph.NewEngine()}
 	snap, err := st.Load(context.Background())
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
@@ -96,4 +98,24 @@ func (s *Service) CurrentFailures() []model.Failure {
 		return out
 	}
 	return nil
+}
+
+// References answers "where is name referenced" against the currently
+// published snapshot (captured once, consistent under concurrent reindex).
+func (s *Service) References(name string, b graph.Budget) (*graph.RefsOutcome, error) {
+	snap := s.current.Load()
+	if snap == nil {
+		return nil, ErrNoSnapshot
+	}
+	return s.graph.References(snap, name, b)
+}
+
+// Impact answers "these files changed; who may be affected" against the
+// currently published snapshot.
+func (s *Service) Impact(changed []string, b graph.Budget) (*graph.ImpactOutcome, error) {
+	snap := s.current.Load()
+	if snap == nil {
+		return nil, ErrNoSnapshot
+	}
+	return s.graph.Impact(snap, changed, b)
 }

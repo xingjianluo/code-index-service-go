@@ -53,6 +53,7 @@ func parseGo(f source.DiscoveredFile, content string, size int64, fileHash strin
 			Column: col,
 		}
 		sym.ID = model.StableSymbolID(f.RelPath, name, kind, line)
+		sym.Key = model.StableSymbolKey(name, kind, line, fileHash)
 		rec.Symbols = append(rec.Symbols, sym)
 		return sym
 	}

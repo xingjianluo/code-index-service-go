@@ -19,6 +19,12 @@ import (
 //	contains (the symbols move), while unchanged content at the same path
 //	keeps identical IDs across repeated indexings.
 //
+// SymbolKey:  sha256("skey\x00" + name + "\x00" + kind + "\x00" + line +
+//
+//	"\x00" + fileContentHash). Path-INDEPENDENT: a pure rename (identical
+//	bytes at a new path) keeps the same key, so "the same symbol" can be
+//	recognized across moves; any content edit yields a new key.
+//
 // ChunkID:    sha256("chk\x00" + path + "\x00" + startLine + ":" + endLine +
 //
 //	"\x00" + fileContentHash). The file-level content hash is part of the
@@ -40,6 +46,21 @@ func HashBytes(b []byte) string {
 // StableSymbolID derives the stable ID of a symbol.
 func StableSymbolID(path, name string, kind SymbolKind, line int) string {
 	return shortHash("sym", path, name, string(kind), itoa(line))
+}
+
+// StableSymbolKey derives the path-independent identity of a symbol:
+//
+//	sha256("skey\x00" + name + "\x00" + kind + "\x00" + line + "\x00" +
+//	fileContentHash)
+//
+// The containing file's raw-content hash anchors the key to the exact file
+// revision, so a pure rename or directory move (identical bytes) keeps the
+// key while any content edit changes it. The line is included so two
+// same-name, same-kind definitions inside one file revision (e.g. two
+// struct fields called ID) remain distinguishable; identical content
+// guarantees identical lines, so this does not break rename continuity.
+func StableSymbolKey(name string, kind SymbolKind, line int, fileContentHash string) string {
+	return shortHash("skey", name, string(kind), itoa(line), fileContentHash)
 }
 
 // StableChunkID derives the stable ID of a chunk. fileContentHash is the

@@ -89,7 +89,7 @@ func (s *Store) Save(ctx context.Context, snap *model.Snapshot) error {
 	}
 	env := toEnvelope(snap)
 	env.StoreFormat = model.StoreFormatV2
-	env.IndexRules = model.IndexRulesV2
+	env.IndexRules = model.IndexRulesV3
 
 	data, err := json.MarshalIndent(env, "", "  ")
 	if err != nil {
@@ -158,25 +158,26 @@ func (s *Store) LoadWithMigration(ctx context.Context, migrate Migrator) (*model
 		return nil, fmt.Errorf("%w: store_format=%d (supported %d..%d)",
 			ErrUnsupportedVersion, env.StoreFormat, model.MinSupportedStoreFormat, model.StoreFormatV2)
 	}
-	if env.IndexRules < model.MinSupportedIndexRules || env.IndexRules > model.IndexRulesV2 {
+	if env.IndexRules < model.MinSupportedIndexRules || env.IndexRules > model.IndexRulesV3 {
 		return nil, fmt.Errorf("%w: index_rules=%d (supported %d..%d)",
-			ErrUnsupportedVersion, env.IndexRules, model.MinSupportedIndexRules, model.IndexRulesV2)
+			ErrUnsupportedVersion, env.IndexRules, model.MinSupportedIndexRules, model.IndexRulesV3)
 	}
 
 	snap := fromEnvelope(&env)
-	migrated := env.StoreFormat == 1 || env.IndexRules == 1
-	// Fixed migration path: v1 -> v2. A v1 store had index_rules=1 and chunks
-	// tokenized under v1 rules; the migrator re-tokenizes them with v2 and the
-	// envelope is rewritten on the next Save.
+	migrated := env.StoreFormat < model.StoreFormatV2 || env.IndexRules < model.IndexRulesV3
+	// Fixed migration path: anything older than the current rules is brought
+	// forward by the injected migrator (v1 chunks are re-tokenized, v2
+	// symbols gain path-independent keys); the envelope is rewritten on the
+	// next Save.
 	if migrated {
 		if migrate == nil {
-			return nil, fmt.Errorf("%w: v1 data requires a migrator but none configured", ErrUnsupportedVersion)
+			return nil, fmt.Errorf("%w: old data requires a migrator but none configured", ErrUnsupportedVersion)
 		}
 		if err := migrate(snap); err != nil {
-			return nil, fmt.Errorf("store: migrate v1->v2: %w", err)
+			return nil, fmt.Errorf("store: migrate to current rules: %w", err)
 		}
 		snap.StoreFormat = model.StoreFormatV2
-		snap.IndexRules = model.IndexRulesV2
+		snap.IndexRules = model.IndexRulesV3
 	}
 	// Integrity check: the stored ID must equal the deterministic identity
 	// derived from files and failures. v1 carries no id field, so it is simply

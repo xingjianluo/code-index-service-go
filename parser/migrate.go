@@ -48,3 +48,43 @@ func MigrateV1ToV2(snap *model.Snapshot) error {
 	snap.ID = model.SnapshotID(snap.Files, snap.Failures)
 	return nil
 }
+
+// MigrateToCurrent is the fixed migration path to the current rules
+// (StoreFormatV2 / IndexRulesV3). It chains the documented steps:
+//
+//   - v1 -> v2: chunk tokens rebuilt with the v2 tokenizer (see
+//     MigrateV1ToV2);
+//   - v2 -> v3: every symbol gains its path-independent Key, recomputed
+//     deterministically as StableSymbolKey(name, kind, line, contentHash)
+//     from data the v2 record already carries. Symbol IDs, chunk IDs and
+//     content hashes are untouched, so the snapshot identity is unchanged.
+//
+// Already-current snapshots pass through unchanged (idempotent).
+func MigrateToCurrent(snap *model.Snapshot) error {
+	if snap == nil {
+		return fmt.Errorf("migrate: nil snapshot")
+	}
+	if snap.StoreFormat == 1 || snap.IndexRules == 1 {
+		if err := MigrateV1ToV2(snap); err != nil {
+			return err
+		}
+	}
+	for _, rec := range snap.Files {
+		for i := range rec.Symbols {
+			sym := &rec.Symbols[i]
+			if sym.Key == "" {
+				sym.Key = model.StableSymbolKey(sym.Name, sym.Kind, sym.Line, rec.ContentHash)
+			}
+		}
+		if rec.Metadata == nil {
+			rec.Metadata = map[string]string{}
+		}
+		if rec.Metadata["migrated_from"] == "" {
+			rec.Metadata["migrated_from"] = "v2"
+		}
+	}
+	snap.StoreFormat = model.StoreFormatV2
+	snap.IndexRules = model.IndexRulesV3
+	snap.ID = model.SnapshotID(snap.Files, snap.Failures)
+	return nil
+}

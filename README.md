@@ -10,14 +10,20 @@
   文件、符号（func/method/type/var/const/field）、引用关系与可检索片段。
   不可读、非法 UTF-8、超出大小/行数上限、无法解析的输入都**不会被静默跳过**，
   而是进入可区分的失败类别（`unreadable / invalid_utf8 / oversize /
-  unparseable / missing`），并参与快照指纹计算。
+  unparseable / missing`）；扩展名不在收录集合的文件记为 `excluded`，
+  同样显式入账并参与快照指纹计算。
 - **增量索引**：基于“路径 + 原始字节 SHA-256”判定新增/修改/删除/重命名；
   同一路径内容不变时记录与其全部派生标识保持稳定；修改会替换旧片段，
   删除/覆盖后的旧内容不可被召回；纯重命名（内容字节完全相同、旧路径消失、
   新路径此前不存在、1:1 对应）单独报告。
+- **符号关系查询**：按符号名查引用（定义/已解析/未解析三类分列，同名多
+  定义按固定优先级归属，重复查询结果一致）；按改动文件算影响面（沿引用
+  链反向传播，每个受影响文件/符号带完整 `via` 链路与深度）。每个符号带
+  路径无关的 `Key`：**只改文件名或移动目录（内容不变）时 Key 不变**，
+  引用关系跨改名不断；所有结果在可控上限内确定性取舍并说明取舍内容。
 - **版本演进**：磁盘信封带 `store_format` 与 `index_rules` 双版本号；
   未知字段（`DisallowUnknownFields`）与不受支持的版本被**明确拒绝**；
-  旧版（v1）数据有确定的迁移路径（用 v2 规则重新分词），不静默降级。
+  旧版数据有确定的迁移路径（v1 重分词、v2 回填符号 Key），不静默降级。
 - **可解释检索 + 预算装配**：打分构成逐项输出，排序完全确定；在
   `MaxResults / MaxTotalChars / MaxChunkChars / MaxCandidates` 预算下按名次
   确定性取舍，每条舍弃都记录原因；有命中但预算无法容纳任何结果时返回
@@ -31,14 +37,15 @@
 
 | 包 | 职责 |
 |---|---|
-| `model` | 核心数据模型、版本常量、稳定标识/指纹规则 |
-| `source` | 本地文件系统扫描（模拟代码来源），确定性顺序，坏目录显式报错 |
-| `parser` | 读取校验与失败分类、Go AST 解析、文本归一、v2 分词、跨文件引用解析、v1→v2 迁移 |
+| `model` | 核心数据模型、版本常量、稳定标识/指纹规则（含路径无关的符号 Key） |
+| `source` | 本地文件系统扫描（模拟代码来源），确定性顺序，坏目录显式报错，被排除文件显式记录 |
+| `parser` | 读取校验与失败分类、Go AST 解析、文本归一、v2 分词、跨文件引用解析、v1→v3 迁移 |
 | `store` | 版本化信封、未知字段/版本拒绝、临时文件 fsync+rename 原子写入、完整性校验 |
 | `indexer` | 两遍式增量索引（解析→1:1 重命名判定→增删改归类→引用解析→原子提交） |
 | `retrieval` | 确定性打分排序、预算装配、可解释截断、零准入显式失败 |
+| `graph` | 按符号查引用（定义/已解析/未解析分列）、按改动文件算影响面（带引用链路与确定性上限） |
 | `service` | 不可变快照的原子发布、读写并发编排、索引串行化 |
-| `cmd/codesearch` | `index` / `search` / `serve` 本地命令行入口 |
+| `cmd/codesearch` | `index` / `search` / `refs` / `impact` / `serve` 本地命令行入口 |
 
 ## 快速开始
 
@@ -53,11 +60,17 @@ go run ./cmd/codesearch index -root ./path/to/repo -store ./tmpidx -max-size 209
 go run ./cmd/codesearch search -store ./tmpidx -query "Greeting" \
   -max-results 10 -max-chars 20000 -max-candidates 400
 
+# 按符号查引用（def 带 key=；resolved/unresolved 分列）
+go run ./cmd/codesearch refs -store ./tmpidx -name Greeting
+
+# 按改动文件算影响面（每个受影响文件带 via 引用链）
+go run ./cmd/codesearch impact -store ./tmpidx -files a.go,b.go -max-depth 2
+
 # 本地 HTTP 服务（仅监听 127.0.0.1）
 go run ./cmd/codesearch serve -root ./path/to/repo -store ./tmpidx -addr 127.0.0.1:8080
 #   GET /healthz   当前快照 id
 #   POST /reindex  增量重建并原子发布（并发调用返回 409）
-#   GET /search?q=...
+#   GET /search?q=...  GET /refs?name=...  GET /impact?files=a.go,b.go
 ```
 
 `index` 输出中 `+ ~ - > !` 分别表示新增、修改、删除、重命名、失败；

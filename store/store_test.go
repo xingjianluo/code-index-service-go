@@ -134,7 +134,8 @@ func TestV1MigrationRetokenizes(t *testing.T) {
   "files": {
     "a.go": {
       "path": "a.go", "language": "go", "size": 30, "content_hash": "deadbeef", "lines": 1,
-      "symbols": [], "references": [],
+      "symbols": [{"id":"s-old","name":"GetUserName","kind":"func","path":"a.go","line":1,"column":6}],
+      "references": [],
       "chunks": [
         {"id":"c-old","path":"a.go","start_line":1,"end_line":1,"kind":"declaration",
          "content":"func GetUserName() string { return \"x\" }",
@@ -156,7 +157,7 @@ func TestV1MigrationRetokenizes(t *testing.T) {
 		t.Fatalf("v1 without migrator must be rejected, got: %v", err)
 	}
 
-	loaded, err := st.LoadWithMigration(context.Background(), parser.MigrateV1ToV2)
+	loaded, err := st.LoadWithMigration(context.Background(), parser.MigrateToCurrent)
 	if err != nil {
 		t.Fatalf("migration: %v", err)
 	}
@@ -174,8 +175,19 @@ func TestV1MigrationRetokenizes(t *testing.T) {
 	if ch.ID != "c-old" {
 		t.Fatalf("chunk identity must be preserved across migration, got %s", ch.ID)
 	}
-	if loaded.StoreFormat != 2 || loaded.IndexRules != 2 {
-		t.Fatalf("version tags not bumped: %d/%d", loaded.StoreFormat, loaded.IndexRules)
+	if loaded.StoreFormat != model.StoreFormatV2 || loaded.IndexRules != model.IndexRulesV3 {
+		t.Fatalf("version tags not bumped to current: %d/%d", loaded.StoreFormat, loaded.IndexRules)
+	}
+	// v2 -> v3 step: symbols gain their path-independent key, recomputed
+	// deterministically from data the old record already carried.
+	sym := loaded.Files["a.go"].Symbols[0]
+	wantKey := model.StableSymbolKey("GetUserName", model.SymbolFunc, 1, "deadbeef")
+	t.Logf("symbol key backfill: id=%s key=%s want=%s", sym.ID, sym.Key, wantKey)
+	if sym.ID != "s-old" {
+		t.Fatalf("symbol id must be preserved across migration, got %s", sym.ID)
+	}
+	if sym.Key != wantKey {
+		t.Fatalf("symbol key not backfilled: got %q want %q", sym.Key, wantKey)
 	}
 	if loaded.ID == "" {
 		t.Fatal("migrated snapshot has no computed id")

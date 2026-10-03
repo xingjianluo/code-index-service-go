@@ -24,6 +24,18 @@ type DiscoveredFile struct {
 	Size    int64
 }
 
+// ExcludedFile is a regular file the scan found but did not select, with
+// the reason. Exclusions are recorded (never silently dropped) so downstream
+// consumers can account for every path in the tree.
+type ExcludedFile struct {
+	RelPath string
+	Size    int64
+	// Reason is a stable machine-readable cause, e.g. "extension_not_indexed".
+	Reason string
+	// Detail carries the concrete evidence, e.g. the unmatched extension.
+	Detail string
+}
+
 // Options controls repository scanning.
 type Options struct {
 	Root        string
@@ -71,20 +83,28 @@ func NewScanner(opts Options) *Scanner {
 // A missing root or an unreadable directory is returned as an error and is
 // never silently skipped.
 func (s *Scanner) Scan() ([]DiscoveredFile, error) {
+	files, _, err := s.ScanDetailed()
+	return files, err
+}
+
+// ScanDetailed is Scan plus the list of regular files that were found but
+// excluded (with reasons), also in deterministic path-sorted order.
+func (s *Scanner) ScanDetailed() ([]DiscoveredFile, []ExcludedFile, error) {
 	root := s.opts.Root
 	info, err := os.Stat(root)
 	if err != nil {
-		return nil, fmt.Errorf("source: stat root %q: %w", root, err)
+		return nil, nil, fmt.Errorf("source: stat root %q: %w", root, err)
 	}
 	if !info.IsDir() {
-		return nil, fmt.Errorf("source: root %q is not a directory", root)
+		return nil, nil, fmt.Errorf("source: root %q is not a directory", root)
 	}
 	absRoot, err := filepath.Abs(root)
 	if err != nil {
-		return nil, fmt.Errorf("source: resolve root %q: %w", root, err)
+		return nil, nil, fmt.Errorf("source: resolve root %q: %w", root, err)
 	}
 
 	var files []DiscoveredFile
+	var excluded []ExcludedFile
 	walkErr := filepath.WalkDir(absRoot, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			// Permission/IO errors on a directory entry are fatal to the scan.
@@ -103,28 +123,38 @@ func (s *Scanner) Scan() ([]DiscoveredFile, error) {
 		if !d.Type().IsRegular() {
 			return nil // symlinks, devices, sockets etc. are not source files
 		}
-		ext := strings.ToLower(filepath.Ext(d.Name()))
-		if !s.opts.IncludeExt[ext] {
-			return nil
-		}
 		rel, relErr := filepath.Rel(absRoot, path)
 		if relErr != nil {
 			return fmt.Errorf("source: relative path for %q: %w", path, relErr)
 		}
+		rel = filepath.ToSlash(rel)
 		size := int64(-1)
 		if fi, fiErr := d.Info(); fiErr == nil {
 			size = fi.Size()
 		}
+		ext := strings.ToLower(filepath.Ext(d.Name()))
+		if !s.opts.IncludeExt[ext] {
+			// Recorded, not dropped: downstream layers surface this file
+			// with its category instead of letting it vanish.
+			excluded = append(excluded, ExcludedFile{
+				RelPath: rel,
+				Size:    size,
+				Reason:  "extension_not_indexed",
+				Detail:  fmt.Sprintf("extension %q not in indexed set", ext),
+			})
+			return nil
+		}
 		files = append(files, DiscoveredFile{
-			RelPath: filepath.ToSlash(rel),
+			RelPath: rel,
 			AbsPath: path,
 			Size:    size,
 		})
 		return nil
 	})
 	if walkErr != nil {
-		return nil, walkErr
+		return nil, nil, walkErr
 	}
 	sort.Slice(files, func(i, j int) bool { return files[i].RelPath < files[j].RelPath })
-	return files, nil
+	sort.Slice(excluded, func(i, j int) bool { return excluded[i].RelPath < excluded[j].RelPath })
+	return files, excluded, nil
 }

@@ -1,8 +1,8 @@
-# 设计说明：索引模型、版本兼容、检索与预算装配
+# 设计说明：索引模型、版本兼容、检索与预算装配、符号关系查询
 
-本文档描述标识规则、版本兼容策略、检索装配规则以及本地复现方法，
-对应实现分布在 `model / source / parser / store / indexer / retrieval /
-service` 七个包中。
+本文档描述标识规则、版本兼容策略、检索装配规则、符号关系（引用/影响
+面）判定规则以及本地复现方法，对应实现分布在 `model / source / parser
+/ store / indexer / retrieval / graph / service` 八个包中。
 
 ---
 
@@ -31,6 +31,14 @@ service` 七个包中。
 | `oversize`    | `stat` 或实际读取字节数 > `MaxFileSize`，或行数 > `MaxFileLines` | `size 300000 exceeds limit 100000 bytes` |
 | `invalid_utf8` | 原始字节非合法 UTF-8（在大小检查之后） | `content is not valid UTF-8` |
 | `unparseable` | Go 严格语法解析失败（`parser.AllErrors`） | `go parser: x.go:2:14: expected ')', found '{' (and 3 more errors)` |
+| `excluded`    | 常规文件但扩展名不在收录集合（`source.DefaultIncludeExt`） | `extension ".weird" not in indexed set` |
+
+> `excluded` 是刻意的“看得见的不分析”：未知后缀的文件（包括非常见
+> 后缀的文本、以及二进制资源）在扫描阶段被记录为 `ExcludedFile`，由
+> indexer 转成失败条目进入快照与指纹。它们不产出符号/引用，但在引用
+> 查询与影响面结果中以 `unanalyzable` 身份显式出现，不会凭空消失。
+> 扩展名在收录集合内但内容不是合法 UTF-8 的二进制文件走
+> `invalid_utf8`，同样显式归类。
 
 > 先大小后编码的顺序是刻意的：避免为超大文件做 UTF-8 扫描。Go 的解析
 > 建立在合法 UTF-8 之上，所以非法编码不会以“解析失败”的模糊面目出现。
@@ -59,6 +67,7 @@ service` 七个包中。
 |---|---|---|
 | `FileRecord.ContentHash` | 文件原始字节 | 任何路径上相同字节 ⇒ 相同哈希；增量判定与重命名检测的唯一权威（不信 mtime） |
 | `Symbol.ID` | `sym | path | name | kind | line` | 同路径同符号同行号 ⇒ 跨重复索引稳定；重命名文件会带着符号“移动”（路径变 ⇒ ID 变）；同位置修改函数体 ⇒ ID 不变 |
+| `Symbol.Key` | `skey | name | kind | line | 文件ContentHash` | **路径无关**：纯重命名/移动目录（字节不变）⇒ Key 不变，“同一条符号”跨改名可辨认；任何内容编辑 ⇒ 新 Key。同文件内同名同类别符号由行号区分（内容相同 ⇒ 行号相同，不破坏改名连续性） |
 | `Chunk.ID` | `chk | path | start:end | 文件ContentHash | 片段自身字节哈希` | 同一文件版本内稳定；**文件任何字节变化都会使全部片段 ID 变化**，旧片段在新快照中不可达 |
 | `Snapshot.ID` | 全部（路径排序后的 `path||content_hash`）+ 失败列表（path、category、message 排序后） | 同一仓库状态（含相同坏输入）⇒ 同一快照 ID，与经历过哪些增量操作、与并发时序无关 |
 
@@ -118,33 +127,33 @@ references, chunks, metadata`。
 
 - 解码使用 `DisallowUnknownFields`（顶层和文件层同理），**未知字段直接
   报错**，例如 `json: unknown field "mystery"`。
-- 版本窗口：`store_format` 与 `index_rules` 都必须落在
-  `[MinSupported(1), Current(2)]`；超出范围返回
+- 版本窗口：`store_format` 必须落在 `[MinSupported(1), Current(2)]`，
+  `index_rules` 必须落在 `[MinSupported(1), Current(3)]`；超出范围返回
   `ErrUnsupportedVersion` 并在消息中给出实际值与支持区间——**不静默
   降级**。
 - 加载时做完整性校验：由文件哈希与失败列表重算 `Snapshot.ID`，v2 数据
   若与存储的 id 不一致即判定损坏并拒绝；v1 数据无 id 字段，迁移后赋予
   重算身份。
 
-### 2.3 v1 → v2 的确定迁移路径
+### 2.3 确定迁移路径（v1 → v2 → v3）
 
-当前版本：`store_format=2`、`index_rules=2`。v1 与 v2 的结构（文件/符号/
-引用/片段）相同，差异在**分词规则**：
+当前版本：`store_format=2`、`index_rules=3`。加载时由
+`parser.MigrateToCurrent` 按固定步骤链式迁移：
 
-- v1：按非字母数字切分 + 小写，且只保留长度 ≥ 2 的 token，不拆驼峰；
-- v2：见 3.1。
+1. **v1 → v2**（`parser.MigrateV1ToV2`）：v1 与 v2 结构相同，差异在
+   **分词规则**。用 v2 `Tokenize` 对每个片段的**已存储 Content** 重新
+   生成 token；文件字节哈希、SymbolID、ChunkID 均不改变；metadata 标注
+   `migrated_from=v1`。
+2. **v2 → v3**：v3 为每个符号补充路径无关的 `Symbol.Key`，由记录中已有
+   的 `(name, kind, line, contentHash)` 确定性重算
+   （`model.StableSymbolKey`）；SymbolID、ChunkID、快照指纹均不变，
+   因此迁移是**纯增量补字段**，不改变任何既有标识。
 
-迁移（`parser.MigrateV1ToV2`）在加载时执行：
-
-1. 用 v2 `Tokenize` 对每个片段的**已存储 Content** 重新生成 token；
-   文件字节哈希、SymbolID、ChunkID 均不因迁移改变（其定义未变）；
-2. 文件 metadata 标注 `migrated_from=v1`；
-3. 重算快照指纹并把版本标记置为 2，下次 `Save` 以 v2 重写。
-
-加载 v1 数据时若未提供迁移器，直接拒绝（“v1 data requires a migrator
-but none configured”）。片段缺少 Content 导致无法重归一化时迁移报错，
-而不是带着半新半旧的 token 继续服务。迁移行为由
-`store.TestV1MigrationRetokenizes` 用手工 v1 信封固定下来。
+迁移后版本标记置为当前值，下次 `Save` 以新规则重写。加载旧数据时若未
+提供迁移器，直接拒绝；片段缺少 Content 导致无法重归一化时迁移报错，
+而不是带着半新半旧的数据继续服务。迁移行为由
+`store.TestV1MigrationRetokenizes`（手工 v1 信封，覆盖重分词与符号
+Key 回填）固定下来。
 
 ---
 
@@ -195,7 +204,81 @@ score = 3.00 * 标题命中次数
 
 ---
 
-## 4. 并发与可见性（service）
+## 4. 符号关系查询（graph）
+
+`graph` 包在**单个不可变快照**上回答两类“顺着符号找关系”的问题，
+全部基于本地已有索引，不引入任何外部服务。所有枚举顺序确定
+（路径/行/列，再按 ID），因此同一快照 + 同一查询 ⇒ 同一答案，
+与查询先后、重复次数无关。
+
+### 4.1 按符号查引用（References）
+
+输入一个符号名，输出分三类、互不混淆：
+
+- **Definitions**：该名字的全部定义，按归属优先级排序
+  （`parser.LessSymbolPrecedence`：类别优先级
+  `func<type<method<var<const<field`，再按路径、行号、SymbolID），
+  每个定义带 `RefCount`（指到它的已解析引用数）与路径无关的 `Key`。
+- **Resolved**：`SymbolID` 非空的引用点——确实指向某个定义。
+  归属规则与索引期解析完全一致：**同文件定义优先**（行号升序、类别
+  优先级、SymbolID），否则取全局第一（类别优先级、路径、行号、
+  SymbolID）。同名多定义时哪条引用归哪个定义由这条固定规则决定，
+  未胜出的定义 `RefCount=0`，仍完整列出。
+- **Unresolved**：名字匹配但没能定位到任何定义的引用点（例如调用了
+  未定义/未索引的函数）。它们只按名字命中，绝不混入 Resolved。
+
+另外附 **Unanalyzable**：快照中所有失败/被排除文件（`excluded`、
+`invalid_utf8` 等，见 1.2）。这些文件里可能存在该名字的引用，但索引
+无从得知——显式列出（带上限），而不是静默缺席。
+
+### 4.2 影响面分析（Impact）
+
+输入一组改动过的文件路径（归一化：去空白、统一 `/`、去重、排序），
+输出“重点回归范围”：
+
+1. **输入分类**：每个输入路径被归入 已索引文件 / 类型化失败
+   （unanalyzable，Notes 说明类别与原因）/ 快照中不存在
+   （`UnknownInputs`，显式报告不丢弃）。
+2. **反向 BFS**：从改动文件出发，沿“引用 → 定义”边反向传播——凡
+   引用了已达文件内符号的文件，成为下一层受影响文件，深度上限
+   `MaxDepth`（默认 2）。
+3. **链路可解释**：每个受影响文件/符号都带 `Via` 边链（从改动文件到
+   它的每一条 `引用方:行:列 -名字-> 定义方`），不是只给一堆名字。
+   受影响符号的深度 0 表示“定义在改动文件中且被外部引用”。
+4. **确定性**：文件与符号按路径/行号入队，消费边按
+   （引用路径， 行， 列）排序遍历；输入文件的给出顺序不影响结果
+   （有对应单测）。
+
+### 4.3 改名场景下的兼容范围
+
+- **纯重命名/移动目录**（字节完全相同、1:1、旧路径消失、新路径此前
+  不存在）：`Symbol.Key` 不变 ⇒ 同一条符号跨改名被认出；引用在每次
+  索引后全量重解析 ⇒ 指向新路径下的新 SymbolID，引用关系不断、不失效；
+  影响面链路的 `ToSymbolKey` 与改名前一致。
+- **改名 + 内容改动**：内容哈希变化 ⇒ 新 Key，按“不同的符号”对待
+  （这是有意的：内容变了，符号语义可能已变）。
+- **重复内容文件**（多份相同字节）：不满足 1:1，不做改名归类
+  （按 新增+删除 报告），Key 相同但分属不同文件记录。
+
+### 4.4 上限与取舍规则（graph.Budget）
+
+| 字段 | 默认 | 含义 |
+|---|---|---|
+| `MaxDefinitions` | 50 | 单次 refs 列出的定义数，超出按优先级序截断（`max_definitions`） |
+| `MaxReferences` | 500 | Resolved / Unresolved 各自的上限，超出按 （路径，行，列） 序截断（`max_references`） |
+| `MaxAffectedFiles` | 200 | 影响面文件数上限，超出按确定性 BFS 顺序舍弃（`max_affected_files`） |
+| `MaxAffectedSymbol` | 200 | 影响面符号数上限（`max_affected_symbols`） |
+| `MaxDepth` | 2 | 影响面传播深度；改动文件本身深度 0 |
+| `MaxEdges` | 2000 | BFS 遍历的引用边总数硬上限，触顶即停（`max_edges`） |
+| `MaxUnanalyzable` | 100 | Unanalyzable 列表上限（`max_unanalyzable`） |
+
+所有取舍都写入 `Truncated`（reason + 具体数量说明），舍弃的是确定
+顺序下的后缀，不是任意子集；`Notes` 记录生效预算与各项计数，便于
+复现判定过程。
+
+---
+
+## 5. 并发与可见性（service）
 
 - `*model.Snapshot` 创建后不再修改。`Service` 以 `atomic.Pointer[Snapshot]`
   持有“当前快照”，只在索引**落盘成功之后**整体交换。
@@ -211,7 +294,7 @@ score = 3.00 * 标题命中次数
 
 ---
 
-## 5. 本地复现指南
+## 6. 本地复现指南
 
 ```bash
 go build ./...
@@ -227,8 +310,19 @@ go run ./cmd/codesearch index  -root ./some-repo -store /tmp/ix
 go run ./cmd/codesearch search -store /tmp/ix -query "your symbol"
 # 修改/重命名/删除文件后再次 index，观察 + ~ - > 分类与 snapshot id
 # 制造坏输入：printf 'bad: \xff' > x.go（invalid_utf8）、
-# 超大文件（oversize）、语法错误文件（unparseable）
+# 超大文件（oversize）、语法错误文件（unparseable）、
+# 未知后缀文件 echo x > notes.weird（excluded）
+
+# 符号关系查询：
+go run ./cmd/codesearch refs   -store /tmp/ix -name Helper
+#   def 行带 key= 与 refs=；ref resolved/unresolved 分列；! 行为 unanalyzable
+go run ./cmd/codesearch impact -store /tmp/ix -files a.go,b.go -max-depth 2
+#   每个受影响文件带 via[i] 引用链；? 行为快照中不存在的输入
+# 改名连续性演练：mv a.go sub/a.go 后重新 index，再 refs -name Helper，
+#   对比前后 key= 相同、resolved 数不变
+
 go run ./cmd/codesearch serve -root ./some-repo -store /tmp/ix
+#   GET /refs?name=Helper   GET /impact?files=a.go,b.go
 ```
 
 失败原因可区分性可直接对照 `index` 输出的 `! [category] path: message

@@ -4,6 +4,8 @@
 //
 //	codesearch index  -root DIR [-store DIR] [-max-size BYTES]
 //	codesearch search -store DIR -query TEXT [-max-results N] [-max-chars N]
+//	codesearch refs   -store DIR -name SYM [-max-refs N]
+//	codesearch impact -store DIR -files a.go,b.go [-max-depth N]
 //	codesearch serve  -root DIR -store DIR [-addr :8080]
 //
 // Everything is local: the source is the local filesystem, the index is a
@@ -19,8 +21,10 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
+	"github.com/xingjianluo/code-index-service-go/graph"
 	"github.com/xingjianluo/code-index-service-go/indexer"
 	"github.com/xingjianluo/code-index-service-go/model"
 	"github.com/xingjianluo/code-index-service-go/parser"
@@ -44,6 +48,10 @@ func main() {
 		err = runIndex(args)
 	case "search":
 		err = runSearch(args)
+	case "refs":
+		err = runRefs(args)
+	case "impact":
+		err = runImpact(args)
 	case "serve":
 		err = runServe(args)
 	case "-h", "--help", "help":
@@ -64,6 +72,8 @@ func usage() {
 usage:
   codesearch index  -root DIR [-store DIR] [-max-size BYTES]
   codesearch search -store DIR -query TEXT [-max-results N] [-max-chars N]
+  codesearch refs   -store DIR -name SYM [-max-refs N]
+  codesearch impact -store DIR -files a.go,b.go [-max-depth N]
   codesearch serve  -root DIR -store DIR [-addr 127.0.0.1:8080]
 `)
 }
@@ -165,6 +175,107 @@ func runSearch(args []string) error {
 	return nil
 }
 
+func runRefs(args []string) error {
+	fs := flag.NewFlagSet("refs", flag.ContinueOnError)
+	storeDir := fs.String("store", ".codesearch-index", "index storage directory")
+	name := fs.String("name", "", "symbol name to look up")
+	maxRefs := fs.Int("max-refs", 500, "maximum reference sites listed per class")
+	maxDefs := fs.Int("max-defs", 50, "maximum definitions listed")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *name == "" {
+		return fmt.Errorf("-name is required")
+	}
+	snap, err := loadSnapshot(*storeDir)
+	if err != nil {
+		return err
+	}
+	out, err := graph.NewEngine().References(snap, *name, graph.Budget{
+		MaxReferences: *maxRefs, MaxDefinitions: *maxDefs,
+	})
+	if err != nil {
+		return err
+	}
+	for _, n := range out.Notes {
+		fmt.Println("#", n)
+	}
+	for _, d := range out.Definitions {
+		fmt.Printf("def %s %s %s:%d:%d key=%s refs=%d\n", d.Kind, d.Name, d.Path, d.Line, d.Column, d.Key, d.RefCount)
+	}
+	for _, r := range out.Resolved {
+		fmt.Printf("ref resolved   %s:%d:%d -> %s\n", r.Path, r.Line, r.Column, r.SymbolID)
+	}
+	for _, r := range out.Unresolved {
+		fmt.Printf("ref unresolved %s:%d:%d\n", r.Path, r.Line, r.Column)
+	}
+	for _, f := range out.Unanalyzable {
+		fmt.Printf("! unanalyzable [%s] %s: %s\n", f.Category, f.Path, f.Message)
+	}
+	for _, t := range out.Truncated {
+		fmt.Printf("~ truncation[%s] %s\n", t.Reason, t.Detail)
+	}
+	fmt.Printf("definitions=%d resolved=%d unresolved=%d snapshot=%s\n",
+		len(out.Definitions), len(out.Resolved), len(out.Unresolved), out.SnapshotID)
+	return nil
+}
+
+func runImpact(args []string) error {
+	fs := flag.NewFlagSet("impact", flag.ContinueOnError)
+	storeDir := fs.String("store", ".codesearch-index", "index storage directory")
+	files := fs.String("files", "", "comma-separated changed file paths (repo-relative)")
+	maxDepth := fs.Int("max-depth", 2, "reference-chain depth")
+	maxFiles := fs.Int("max-files", 200, "maximum affected files listed")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *files == "" {
+		return fmt.Errorf("-files is required")
+	}
+	snap, err := loadSnapshot(*storeDir)
+	if err != nil {
+		return err
+	}
+	out, err := graph.NewEngine().Impact(snap, strings.Split(*files, ","), graph.Budget{
+		MaxDepth: *maxDepth, MaxAffectedFiles: *maxFiles,
+	})
+	if err != nil {
+		return err
+	}
+	for _, n := range out.Notes {
+		fmt.Println("#", n)
+	}
+	for _, s := range out.AffectedSymbols {
+		fmt.Printf("sym depth=%d %s %s:%d key=%s\n", s.Depth, s.Kind, s.Path, s.Line, s.Key)
+	}
+	for _, f := range out.AffectedFiles {
+		fmt.Printf("file depth=%d %s\n", f.Depth, f.Path)
+		for i, e := range f.Via {
+			fmt.Printf("  via[%d] %s:%d:%d -%s-> %s (%s)\n", i, e.FromPath, e.FromLine, e.FromColumn, e.Name, e.ToPath, e.ToSymbolKey)
+		}
+	}
+	for _, u := range out.UnknownInputs {
+		fmt.Println("? unknown input:", u)
+	}
+	for _, f := range out.Unanalyzable {
+		fmt.Printf("! unanalyzable [%s] %s: %s\n", f.Category, f.Path, f.Message)
+	}
+	for _, t := range out.Truncated {
+		fmt.Printf("~ truncation[%s] %s\n", t.Reason, t.Detail)
+	}
+	fmt.Printf("affected_files=%d affected_symbols=%d snapshot=%s\n",
+		len(out.AffectedFiles), len(out.AffectedSymbols), out.SnapshotID)
+	return nil
+}
+
+func loadSnapshot(storeDir string) (*model.Snapshot, error) {
+	st, err := store.New(storeDir)
+	if err != nil {
+		return nil, err
+	}
+	return st.Load(context.Background())
+}
+
 func runServe(args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	root := fs.String("root", ".", "repository root to index (local)")
@@ -203,6 +314,23 @@ func runServe(args []string) error {
 			return
 		}
 		writeJSON(w, outcome)
+	})
+	mux.HandleFunc("/refs", func(w http.ResponseWriter, r *http.Request) {
+		out, err := svc.References(r.URL.Query().Get("name"), graph.Budget{})
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, out)
+	})
+	mux.HandleFunc("/impact", func(w http.ResponseWriter, r *http.Request) {
+		files := strings.Split(r.URL.Query().Get("files"), ",")
+		out, err := svc.Impact(files, graph.Budget{})
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, out)
 	})
 	log.Printf("codesearch serving %q on %s (store=%s)", *root, *addr, *storeDir)
 	return http.ListenAndServe(*addr, mux)

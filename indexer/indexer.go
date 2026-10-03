@@ -43,7 +43,7 @@ func New(sc *source.Scanner, pa *parser.Parser, st *store.Store) *Indexer {
 // Re-indexing an unchanged tree yields an equal snapshot ID and identical
 // records, regardless of how many times it is repeated.
 func (i *Indexer) Index(ctx context.Context, root string) (*model.Snapshot, *model.IndexReport, error) {
-	previous, err := i.store.LoadWithMigration(ctx, parser.MigrateV1ToV2)
+	previous, err := i.store.LoadWithMigration(ctx, parser.MigrateToCurrent)
 	if err != nil && err != store.ErrNotFound {
 		return nil, nil, err
 	}
@@ -52,7 +52,7 @@ func (i *Indexer) Index(ctx context.Context, root string) (*model.Snapshot, *mod
 
 // indexWith is the incremental core (previous may be nil).
 func (i *Indexer) indexWith(ctx context.Context, root string, previous *model.Snapshot) (*model.Snapshot, *model.IndexReport, error) {
-	discovered, err := i.scanner.Scan()
+	discovered, excluded, err := i.scanner.ScanDetailed()
 	if err != nil {
 		return nil, nil, err
 	}
@@ -83,6 +83,17 @@ func (i *Indexer) indexWith(ctx context.Context, root string, previous *model.Sn
 	parsedList := make([]parsed, 0, len(discovered))
 	var failures []model.Failure
 	newHashPaths := make(map[string][]string)
+	// Files outside the indexed extension set are accounted for as typed
+	// "excluded" failures: they carry no symbols/references, but they must
+	// not vanish from reports, impact analysis or the snapshot identity.
+	for _, ex := range excluded {
+		failures = append(failures, model.Failure{
+			Path:     ex.RelPath,
+			Category: model.FailureExcluded,
+			Message:  ex.Detail,
+			Size:     ex.Size,
+		})
+	}
 	for _, df := range discovered {
 		if err := ctx.Err(); err != nil {
 			return nil, nil, err
@@ -160,7 +171,7 @@ func (i *Indexer) indexWith(ctx context.Context, root string, previous *model.Sn
 	sortFailures(failures)
 	snap := &model.Snapshot{
 		StoreFormat: model.StoreFormatV2,
-		IndexRules:  model.IndexRulesV2,
+		IndexRules:  model.IndexRulesV3,
 		Files:       newFiles,
 		Failures:    failures,
 		CreatedAt:   time.Now().UTC(),

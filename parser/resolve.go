@@ -19,6 +19,25 @@ var kindPriority = map[model.SymbolKind]int{
 	model.SymbolField:  5,
 }
 
+// LessSymbolPrecedence is the single source of truth for the deterministic
+// ordering of same-name symbols: kind priority, then defining path, then
+// line, then symbol ID. Reference resolution (below) and read-side
+// attribution reporting (package graph) both sort with it, so a name always
+// maps to the same definition for a given snapshot regardless of query
+// order or repetition.
+func LessSymbolPrecedence(a, b model.Symbol) bool {
+	if pa, pb := kindPriority[a.Kind], kindPriority[b.Kind]; pa != pb {
+		return pa < pb
+	}
+	if a.Path != b.Path {
+		return a.Path < b.Path
+	}
+	if a.Line != b.Line {
+		return a.Line < b.Line
+	}
+	return a.ID < b.ID
+}
+
 // ResolveReferences assigns reference.SymbolID targets across all records
 // using deterministic precedence so repeated indexings resolve identically:
 //
@@ -35,19 +54,7 @@ func (p *Parser) ResolveReferences(records []*model.FileRecord) {
 	}
 	for name := range byName {
 		set := byName[name]
-		sort.Slice(set, func(i, j int) bool {
-			a, b := set[i], set[j]
-			if pa, pb := kindPriority[a.Kind], kindPriority[b.Kind]; pa != pb {
-				return pa < pb
-			}
-			if a.Path != b.Path {
-				return a.Path < b.Path
-			}
-			if a.Line != b.Line {
-				return a.Line < b.Line
-			}
-			return a.ID < b.ID
-		})
+		sort.Slice(set, func(i, j int) bool { return LessSymbolPrecedence(set[i], set[j]) })
 		byName[name] = set
 	}
 

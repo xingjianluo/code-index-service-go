@@ -8,8 +8,13 @@ import "time"
 const (
 	// StoreFormatV2 is the current on-disk envelope format version.
 	StoreFormatV2 = 2
-	// IndexRulesV2 is the current index/normalization rules version.
+	// IndexRulesV2 is the previous index/normalization rules version
+	// (symbols carried no path-independent Key).
 	IndexRulesV2 = 2
+	// IndexRulesV3 is the current index/normalization rules version:
+	// symbols additionally carry a path-independent Key that survives
+	// pure renames (see StableSymbolKey).
+	IndexRulesV3 = 3
 
 	MinSupportedStoreFormat = 1
 	MinSupportedIndexRules  = 1
@@ -26,6 +31,7 @@ const (
 	FailureOversize    FailureCategory = "oversize"     // file exceeds the configured size limit
 	FailureUnparseable FailureCategory = "unparseable"  // parser rejects the content
 	FailureMissing     FailureCategory = "missing"      // scan saw the file but read found it gone
+	FailureExcluded    FailureCategory = "excluded"     // extension outside the indexed set; recorded, never silently dropped
 )
 
 // Content identity ------------------------------------------------------------
@@ -53,6 +59,12 @@ const (
 // Symbol is a named definition extracted from a file.
 type Symbol struct {
 	ID     string     `json:"id"`
+	// Key is the path-independent identity: it derives from name/kind/line
+	// and the containing file's content hash, so a pure rename (identical
+	// bytes at a new path) keeps the same Key while any content edit
+	// produces a new one. Use Key to recognize "the same symbol" across
+	// renames; use ID for position-anchored identity within one snapshot.
+	Key    string     `json:"key,omitempty"`
 	Name   string     `json:"name"`
 	Kind   SymbolKind `json:"kind"`
 	Path   string     `json:"path"`

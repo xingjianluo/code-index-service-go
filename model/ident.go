@@ -42,6 +42,17 @@ func StableSymbolID(path, name string, kind SymbolKind, line int) string {
 	return shortHash("sym", path, name, string(kind), itoa(line))
 }
 
+// StableSymbolKey derives a path-independent identity for a symbol:
+// sha256("symkey" + fileContentHash + name + kind + line). Because a pure
+// rename/move preserves the file's raw bytes (hence ContentHash) and every
+// extracted position, the key survives renames while the path-based
+// StableSymbolID does not. Two identical files (duplicates) share keys for
+// their same-position symbols; callers that need to distinguish duplicates
+// must combine the key with the path.
+func StableSymbolKey(fileContentHash, name string, kind SymbolKind, line int) string {
+	return shortHash("symkey", fileContentHash, name, string(kind), itoa(line))
+}
+
 // StableChunkID derives the stable ID of a chunk. fileContentHash is the
 // containing file's raw-content hash; chunkContentHash is the fragment's own
 // bytes hash (retained on the chunk for content-level checks).

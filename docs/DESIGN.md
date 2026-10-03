@@ -211,7 +211,85 @@ score = 3.00 * 标题命中次数
 
 ---
 
-## 5. 本地复现指南
+## 5. 符号关系追踪（relation）
+
+`relation` 包在已发布的不可变快照上回答两类“顺着符号找关系”的问题，
+只使用本地索引，不引入任何外部服务。对应 service 方法
+`References / Impact`、CLI 子命令 `refs / impact`、HTTP 端点
+`/refs?name=`、`/impact?files=`。
+
+### 5.1 按符号查引用（References）
+
+输入一个符号名字，输出该名字的**全部**出现位置，并严格分成两类，绝不
+混在一起：
+
+- `resolved`：索引期已绑定到某个定义的出现（`Reference.SymbolID` 非空），
+  每条带目标定义的位置与改名稳定键（`target_key`）；
+- `unresolved`：名字出现了但全仓库没有任何定义可绑定（`SymbolID` 为空），
+  只带出现位置。
+
+归属规则（同名多个定义时）：**查询不重做归属判定**，只报告索引期
+`parser.ResolveReferences` 已经定下的结果——同文件定义优先，否则按类别
+优先级 `func < type < method < var < const < field`，再按（定义路径、
+行号、SymbolID）。因此同一份快照上重复查询、或以不同顺序发起查询，
+结果逐字节一致（测试里用两次查询的 JSON 逐字节比较固定这一点）。
+定义列表本身按（路径、行号、类别、ID）固定排序输出。
+
+### 5.2 按改动文件算影响面（Impact）
+
+输入一组改动过的文件（仓库相对路径，归一化、去重、排序后处理，与调用
+顺序无关），输出：
+
+- `changed`：**每个**输入文件的明确归类，不静默丢弃：
+  - `indexed`：在索引中，其定义的符号作为影响源；
+  - `failed`：在索引失败列表中，原样带出失败类别与证据（如
+    `invalid_utf8`）——非常见后缀但落在收录扩展名内、内容又不是普通
+    文本的文件落在这里；
+  - `unknown`：不在索引中（扩展名被扫描规则排除、被剪枝、或根本不
+    存在），说明原因并标明“不贡献符号级影响”。
+- `impacted`：直接受影响文件。判定规则：其它文件中的某条引用在索引期
+  被解析到**改动文件中定义的符号**。每条影响带引用链
+  `defines: 改动文件 -> 符号` + `references: 受影响文件:行 -> 符号`，
+  链上带定义位置、改名稳定键与该文件内出现次数。
+- `suspected`：疑似受影响，单独列出。判定规则：某出现的名字在改动文件
+  中也有定义，但索引期被绑定到了**其它未改动文件**的同名定义（多定义
+  全局兜底）；编辑改动文件可能改变归属排序，故列出但不计入直接影响。
+  绑定到**同文件**定义的出现可证明不受影响（同文件恒优先），不列出。
+
+### 5.3 改名场景下的兼容范围
+
+- 符号有两个身份：路径敏感的 `Symbol.ID`（`sym|path|name|kind|line`，
+  改名即变）与改名稳定的 `StableSymbolKey`
+  （`symkey|文件ContentHash|name|kind|line`）。纯重命名/挪目录保持文件
+  字节不变 ⇒ ContentHash、行号、类别都不变 ⇒ **Key 不变**。
+- 兼容范围：凡被索引器判定为**纯重命名**（内容字节完全相同、旧路径
+  消失、新路径此前不存在、1:1 对应）的情形，符号的 Key 连续，引用关系
+  在改名后的快照中照常解析（引用解析是纯名字匹配，与路径无关），不会
+  断掉或变成未解析；`refs` 输出里能看到“同一个 Key、新的路径与新的
+  路径敏感 ID”。
+- 边界：**内容有改动**的“改名”不在此列（按 新增+删除 报告，符号视为
+  新定义）；内容完全相同的**重复文件**在同一快照内会同 Key（此时需
+  结合路径区分）；Key 只保证“同内容同位置符号”的连续性，不表达语义
+  等价。
+
+### 5.4 上限与取舍规则
+
+`relation.Limits`（0 取默认值），所有上限都先按确定规则排序再截断，
+截断事件写入 `Truncated`（含原因与数量），不静默丢：
+
+| 字段 | 默认 | 含义 |
+|---|---|---|
+| `MaxDefinitions` | 64 | 一个名字纳入输出的定义数；超出按（路径、行号、类别、ID）截断，记 `max_definitions` |
+| `MaxReferences` | 500 | resolved / unresolved 每类各保留的出现数；超出按（路径、行、列）截断，记 `max_references` |
+| `MaxImpacted` | 200 | impacted / suspected 每类各保留的文件数；超出按路径序截断，记 `max_impacted` |
+| `MaxChainEdges` | 8 | 每个受影响文件保留的引用链数（一条链对应一个依赖符号）；超出按符号名序截断，记 `max_chain_edges` |
+
+同一文件对同一符号的多次出现合并为一条链，最早出现位置作为证据、
+总次数写入链的 detail，避免大文件刷爆链数上限。
+
+---
+
+## 6. 本地复现指南
 
 ```bash
 go build ./...
@@ -228,7 +306,15 @@ go run ./cmd/codesearch search -store /tmp/ix -query "your symbol"
 # 修改/重命名/删除文件后再次 index，观察 + ~ - > 分类与 snapshot id
 # 制造坏输入：printf 'bad: \xff' > x.go（invalid_utf8）、
 # 超大文件（oversize）、语法错误文件（unparseable）
+
+# 符号关系追踪（第 5 节）
+go run ./cmd/codesearch refs   -store /tmp/ix -name YourSymbol
+go run ./cmd/codesearch impact -store /tmp/ix -files pkg/a.go,pkg/b.go
+# 纯改名演练：mv pkg/a.go pkg/b.go && 再次 index 后 refs 同一符号，
+# 观察 key 不变、路径敏感 id 变化、引用仍然 resolved
+
 go run ./cmd/codesearch serve -root ./some-repo -store /tmp/ix
+#   GET /refs?name=YourSymbol   GET /impact?files=pkg/a.go,pkg/b.go
 ```
 
 失败原因可区分性可直接对照 `index` 输出的 `! [category] path: message

@@ -22,6 +22,11 @@
   `MaxResults / MaxTotalChars / MaxChunkChars / MaxCandidates` 预算下按名次
   确定性取舍，每条舍弃都记录原因；有命中但预算无法容纳任何结果时返回
   `ErrBudgetUnsatisfiable`，绝不静默截断成空/无效结果。
+- **符号关系追踪**：按符号查引用（resolved/unresolved 严格分列，同名多定义
+  归属采用索引期固定规则，重复查询结果一致）；按改动文件算影响面（每条影响
+  带引用链，改动文件逐个明确归类：indexed/failed/unknown）；纯改名不改内容时
+  符号凭改名稳定键（StableSymbolKey）保持连续，引用关系不断；所有上限确定性
+  截断并记录原因。
 - **并发一致**：快照不可变，服务用原子指针发布；检索永远看到完整的旧快照
   或完整的新快照，不会读到半更新或新旧混合状态；索引写串行化。
 - **可复现测试**：覆盖增量/重命名、异常或缺字段输入、版本差异、并发读写；
@@ -37,8 +42,9 @@
 | `store` | 版本化信封、未知字段/版本拒绝、临时文件 fsync+rename 原子写入、完整性校验 |
 | `indexer` | 两遍式增量索引（解析→1:1 重命名判定→增删改归类→引用解析→原子提交） |
 | `retrieval` | 确定性打分排序、预算装配、可解释截断、零准入显式失败 |
+| `relation` | 按符号查引用（resolved/unresolved 分列）、按改动文件算影响面（带引用链）、改名稳定键、确定性上限取舍 |
 | `service` | 不可变快照的原子发布、读写并发编排、索引串行化 |
-| `cmd/codesearch` | `index` / `search` / `serve` 本地命令行入口 |
+| `cmd/codesearch` | `index` / `search` / `refs` / `impact` / `serve` 本地命令行入口 |
 
 ## 快速开始
 
@@ -53,11 +59,17 @@ go run ./cmd/codesearch index -root ./path/to/repo -store ./tmpidx -max-size 209
 go run ./cmd/codesearch search -store ./tmpidx -query "Greeting" \
   -max-results 10 -max-chars 20000 -max-candidates 400
 
+# 按符号查引用（resolved / unresolved 分列）
+go run ./cmd/codesearch refs -store ./tmpidx -name Greeting
+
+# 按改动文件算影响面（带引用链，改动文件逐个归类）
+go run ./cmd/codesearch impact -store ./tmpidx -files pkg/a.go,pkg/b.go
+
 # 本地 HTTP 服务（仅监听 127.0.0.1）
 go run ./cmd/codesearch serve -root ./path/to/repo -store ./tmpidx -addr 127.0.0.1:8080
 #   GET /healthz   当前快照 id
 #   POST /reindex  增量重建并原子发布（并发调用返回 409）
-#   GET /search?q=...
+#   GET /search?q=...  GET /refs?name=...  GET /impact?files=a.go,b.go
 ```
 
 `index` 输出中 `+ ~ - > !` 分别表示新增、修改、删除、重命名、失败；
@@ -83,4 +95,5 @@ go vet ./...
 ## 进一步阅读
 
 - [docs/DESIGN.md](docs/DESIGN.md)：索引模型与标识规则、版本兼容策略、
-  检索与预算装配规则、失败语义与并发模型的详细说明。
+  检索与预算装配规则、符号关系追踪（判定规则/改名兼容范围/上限取舍）、
+  失败语义与并发模型的详细说明。

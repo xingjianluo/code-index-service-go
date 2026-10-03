@@ -19,6 +19,7 @@ import (
 
 	"github.com/xingjianluo/code-index-service-go/indexer"
 	"github.com/xingjianluo/code-index-service-go/model"
+	"github.com/xingjianluo/code-index-service-go/relation"
 	"github.com/xingjianluo/code-index-service-go/retrieval"
 	"github.com/xingjianluo/code-index-service-go/store"
 )
@@ -34,13 +35,14 @@ type Service struct {
 	idx      *indexer.Indexer
 	st       *store.Store
 	engine   *retrieval.Engine
+	rel      *relation.Engine
 	current  atomic.Pointer[model.Snapshot]
 	indexing atomic.Bool
 }
 
 // New creates a Service and loads the last committed snapshot if present.
 func New(idx *indexer.Indexer, st *store.Store, engine *retrieval.Engine) (*Service, error) {
-	s := &Service{idx: idx, st: st, engine: engine}
+	s := &Service{idx: idx, st: st, engine: engine, rel: relation.NewEngine()}
 	snap, err := st.Load(context.Background())
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
@@ -96,4 +98,25 @@ func (s *Service) CurrentFailures() []model.Failure {
 		return out
 	}
 	return nil
+}
+
+// References answers "where is name referenced" on the currently published
+// snapshot (captured once, so the answer is consistent even if a reindex
+// commits mid-query).
+func (s *Service) References(name string, l relation.Limits) (*relation.ReferencesOutcome, error) {
+	snap := s.current.Load()
+	if snap == nil {
+		return nil, ErrNoSnapshot
+	}
+	return s.rel.References(context.Background(), snap, name, l)
+}
+
+// Impact answers "who is affected by changes to these files" on the
+// currently published snapshot.
+func (s *Service) Impact(changedFiles []string, l relation.Limits) (*relation.ImpactOutcome, error) {
+	snap := s.current.Load()
+	if snap == nil {
+		return nil, ErrNoSnapshot
+	}
+	return s.rel.Impact(context.Background(), snap, changedFiles, l)
 }

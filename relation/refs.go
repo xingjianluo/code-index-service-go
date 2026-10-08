@@ -55,6 +55,7 @@ func (e *Engine) References(ctx context.Context, snap *model.Snapshot, name stri
 		Definitions: []DefinitionView{},
 		Resolved:    []ReferenceHit{},
 		Unresolved:  []ReferenceHit{},
+		Unanalyzed:  []UnanalyzedFile{},
 		Truncated:   []Truncation{},
 		Notes:       []string{},
 	}
@@ -141,11 +142,74 @@ func (e *Engine) References(ctx context.Context, snap *model.Snapshot, name stri
 		out.Unresolved = out.Unresolved[:l.MaxReferences]
 	}
 
+	// Scanned-but-unanalyzed files (unusual extension, non-text content) get
+	// an explicit account so they never vanish from the answer. They are a
+	// separate list: they hold no parsed occurrences, so they must not leak
+	// into Resolved/Unresolved.
+	out.Unanalyzed = collectUnanalyzed(snap.Skipped, name, l, &out.Truncated)
+
 	out.Notes = append(out.Notes, fmt.Sprintf(
-		"name=%q definitions=%d resolved=%d unresolved=%d limits={definitions:%d references:%d}",
-		name, len(out.Definitions), len(out.Resolved), len(out.Unresolved),
+		"name=%q definitions=%d resolved=%d unresolved=%d unanalyzed=%d limits={definitions:%d references:%d}",
+		name, len(out.Definitions), len(out.Resolved), len(out.Unresolved), len(out.Unanalyzed),
 		l.MaxDefinitions, l.MaxReferences))
 	out.Notes = append(out.Notes,
 		"attribution: fixed at index time (same-file definition wins, then kind priority func<type<method<var<const<field, then path, line); query never re-decides")
+	out.Notes = append(out.Notes,
+		"unanalyzed: scanned files never parsed (extension_not_indexed / non_text); name_present=yes means the name occurs in the index-time token list, unknown means it cannot be ruled out")
 	return out, nil
+}
+
+// collectUnanalyzed decides, deterministically and from snapshot data only,
+// which skipped files are relevant to name:
+//
+//   - non_text: always listed with name_present=unknown (binary content may
+//     contain anything; we cannot analyze it);
+//   - extension_not_indexed with a complete token list: listed only when the
+//     name provably occurs (name_present=yes); provable absence omits the
+//     file;
+//   - extension_not_indexed with a truncated/unavailable token list: listed
+//     with name_present=unknown unless the name was found (yes).
+//
+// The result is sorted by path and capped at MaxReferences with an explained
+// truncation.
+func collectUnanalyzed(skipped []model.SkippedFile, name string, l Limits, trunc *[]Truncation) []UnanalyzedFile {
+	out := []UnanalyzedFile{}
+	sorted := append([]model.SkippedFile(nil), skipped...)
+	sort.SliceStable(sorted, func(i, j int) bool { return sorted[i].Path < sorted[j].Path })
+	for _, sk := range sorted {
+		uf := UnanalyzedFile{
+			Path:     sk.Path,
+			Category: string(sk.Category),
+			Detail:   sk.Detail,
+		}
+		switch sk.Category {
+		case model.SkipNonText:
+			uf.NamePresent = "unknown"
+		default: // extension_not_indexed (and any future text-ish category)
+			switch {
+			case tokenListContains(sk.Tokens, name):
+				uf.NamePresent = "yes"
+			case sk.Tokens == nil || sk.TokensTruncated:
+				uf.NamePresent = "unknown"
+			default:
+				continue // complete token list proves the name is absent
+			}
+		}
+		out = append(out, uf)
+	}
+	if len(out) > l.MaxReferences {
+		*trunc = append(*trunc, Truncation{
+			Reason: "max_unanalyzed",
+			Detail: fmt.Sprintf("%d unanalyzed files relevant to %q, kept first %d in path order (cap follows MaxReferences)",
+				len(out), name, l.MaxReferences),
+		})
+		out = out[:l.MaxReferences]
+	}
+	return out
+}
+
+// tokenListContains reports membership in a sorted token list.
+func tokenListContains(tokens []string, name string) bool {
+	i := sort.SearchStrings(tokens, name)
+	return i < len(tokens) && tokens[i] == name
 }

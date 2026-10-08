@@ -54,7 +54,7 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 		},
 		Failures: []model.Failure{},
 	}
-	snap.ID = model.SnapshotID(snap.Files, snap.Failures)
+	snap.ID = model.SnapshotID(snap.Files, snap.Failures, snap.Skipped)
 	if err := st.Save(context.Background(), snap); err != nil {
 		t.Fatalf("save: %v", err)
 	}
@@ -186,7 +186,7 @@ func TestAtomicWriteLeavesNoTempFile(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "st")
 	st, _ := store.New(dir)
 	snap := &model.Snapshot{Files: map[string]*model.FileRecord{}, Failures: []model.Failure{}}
-	snap.ID = model.SnapshotID(snap.Files, snap.Failures)
+	snap.ID = model.SnapshotID(snap.Files, snap.Failures, snap.Skipped)
 	if err := st.Save(context.Background(), snap); err != nil {
 		t.Fatal(err)
 	}

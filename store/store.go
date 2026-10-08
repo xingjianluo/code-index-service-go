@@ -65,6 +65,9 @@ type envelope struct {
 	CreatedAt   string                   `json:"created_at"` // RFC3339Nano
 	Files       map[string]*fileEnvelope `json:"files"`
 	Failures    []model.Failure          `json:"failures"`
+	// Skipped is omitted when empty so envelopes written before skipped
+	// tracking existed still load (and keep their snapshot ID).
+	Skipped []model.SkippedFile `json:"skipped,omitempty"`
 }
 
 type fileEnvelope struct {
@@ -182,7 +185,7 @@ func (s *Store) LoadWithMigration(ctx context.Context, migrate Migrator) (*model
 	// derived from files and failures. v1 carries no id field, so it is simply
 	// assigned the recomputed identity; any v2 mismatch means corruption or a
 	// broken migration and is rejected rather than silently trusted.
-	want := model.SnapshotID(snap.Files, snap.Failures)
+	want := model.SnapshotID(snap.Files, snap.Failures, snap.Skipped)
 	switch {
 	case migrated:
 		snap.ID = want

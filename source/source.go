@@ -71,20 +71,31 @@ func NewScanner(opts Options) *Scanner {
 // A missing root or an unreadable directory is returned as an error and is
 // never silently skipped.
 func (s *Scanner) Scan() ([]DiscoveredFile, error) {
+	included, _, err := s.ScanWithExcluded()
+	return included, err
+}
+
+// ScanWithExcluded additionally reports the regular files the walk saw but
+// rejected by the extension filter, also in deterministic path order. Every
+// file on disk is therefore accounted for: either it is a parse candidate or
+// it appears in the excluded list (directories in SkipDirs are still pruned
+// wholesale, and non-regular files are still ignored).
+func (s *Scanner) ScanWithExcluded() (included, excluded []DiscoveredFile, err error) {
 	root := s.opts.Root
 	info, err := os.Stat(root)
 	if err != nil {
-		return nil, fmt.Errorf("source: stat root %q: %w", root, err)
+		return nil, nil, fmt.Errorf("source: stat root %q: %w", root, err)
 	}
 	if !info.IsDir() {
-		return nil, fmt.Errorf("source: root %q is not a directory", root)
+		return nil, nil, fmt.Errorf("source: root %q is not a directory", root)
 	}
 	absRoot, err := filepath.Abs(root)
 	if err != nil {
-		return nil, fmt.Errorf("source: resolve root %q: %w", root, err)
+		return nil, nil, fmt.Errorf("source: resolve root %q: %w", root, err)
 	}
 
 	var files []DiscoveredFile
+	var skipped []DiscoveredFile
 	walkErr := filepath.WalkDir(absRoot, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			// Permission/IO errors on a directory entry are fatal to the scan.
@@ -104,9 +115,6 @@ func (s *Scanner) Scan() ([]DiscoveredFile, error) {
 			return nil // symlinks, devices, sockets etc. are not source files
 		}
 		ext := strings.ToLower(filepath.Ext(d.Name()))
-		if !s.opts.IncludeExt[ext] {
-			return nil
-		}
 		rel, relErr := filepath.Rel(absRoot, path)
 		if relErr != nil {
 			return fmt.Errorf("source: relative path for %q: %w", path, relErr)
@@ -115,16 +123,22 @@ func (s *Scanner) Scan() ([]DiscoveredFile, error) {
 		if fi, fiErr := d.Info(); fiErr == nil {
 			size = fi.Size()
 		}
-		files = append(files, DiscoveredFile{
+		df := DiscoveredFile{
 			RelPath: filepath.ToSlash(rel),
 			AbsPath: path,
 			Size:    size,
-		})
+		}
+		if !s.opts.IncludeExt[ext] {
+			skipped = append(skipped, df)
+			return nil
+		}
+		files = append(files, df)
 		return nil
 	})
 	if walkErr != nil {
-		return nil, walkErr
+		return nil, nil, walkErr
 	}
 	sort.Slice(files, func(i, j int) bool { return files[i].RelPath < files[j].RelPath })
-	return files, nil
+	sort.Slice(skipped, func(i, j int) bool { return skipped[i].RelPath < skipped[j].RelPath })
+	return files, skipped, nil
 }

@@ -30,7 +30,7 @@ func snap(chunks ...model.Chunk) *model.Snapshot {
 		}
 		rec.Chunks = append(rec.Chunks, c)
 	}
-	s.ID = model.SnapshotID(s.Files, s.Failures)
+	s.ID = model.SnapshotID(s.Files, s.Failures, s.Skipped)
 	return s
 }
 

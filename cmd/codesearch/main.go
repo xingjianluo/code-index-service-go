@@ -107,14 +107,14 @@ func runIndex(args []string) error {
 	if err != nil {
 		return err
 	}
-	printReport(report, svc.CurrentFailures(), time.Since(started))
+	printReport(report, svc.CurrentFailures(), svc.CurrentSkipped(), time.Since(started))
 	return nil
 }
 
-func printReport(r *model.IndexReport, failures []model.Failure, d time.Duration) {
+func printReport(r *model.IndexReport, failures []model.Failure, skipped []model.SkippedFile, d time.Duration) {
 	fmt.Printf("snapshot=%s root=%q\n", r.SnapshotID, r.Root)
-	fmt.Printf("added=%d modified=%d deleted=%d renamed=%d unchanged=%d failed=%d (%s)\n",
-		len(r.Added), len(r.Modified), len(r.Deleted), len(r.Renamed), len(r.Unchanged), len(r.Failed), d)
+	fmt.Printf("added=%d modified=%d deleted=%d renamed=%d unchanged=%d failed=%d skipped=%d (%s)\n",
+		len(r.Added), len(r.Modified), len(r.Deleted), len(r.Renamed), len(r.Unchanged), len(r.Failed), len(skipped), d)
 	for _, p := range r.Added {
 		fmt.Println("  +", p)
 	}
@@ -129,6 +129,9 @@ func printReport(r *model.IndexReport, failures []model.Failure, d time.Duration
 	}
 	for _, f := range failures {
 		fmt.Printf("  ! [%s] %s: %s (size=%d)\n", f.Category, f.Path, f.Message, f.Size)
+	}
+	for _, sk := range skipped {
+		fmt.Printf("  * [%s] %s: %s (size=%d)\n", sk.Category, sk.Path, sk.Detail, sk.Size)
 	}
 }
 
@@ -217,6 +220,10 @@ func runRefs(args []string) error {
 	fmt.Printf("unresolved occurrences (%d):\n", len(out.Unresolved))
 	for _, h := range out.Unresolved {
 		fmt.Printf("  ?  %s:%d:%d\n", h.Path, h.Line, h.Column)
+	}
+	fmt.Printf("unanalyzed files (scanned but never parsed) (%d):\n", len(out.Unanalyzed))
+	for _, u := range out.Unanalyzed {
+		fmt.Printf("  !  [%s] %s name_present=%s (%s)\n", u.Category, u.Path, u.NamePresent, u.Detail)
 	}
 	for _, t := range out.Truncated {
 		fmt.Printf("~ truncation[%s] %s\n", t.Reason, t.Detail)

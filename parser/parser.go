@@ -45,6 +45,9 @@ func New(opts Options) *Parser {
 	return &Parser{opts: opts}
 }
 
+// MaxFileSize reports the effective per-file size limit (after defaults).
+func (p *Parser) MaxFileSize() int64 { return p.opts.MaxFileSize }
+
 // ParseFile reads and parses one file. It returns exactly one of record or
 // failure. A failure is never silent: its category is distinguishable and its
 // message records the concrete evidence (size, error text).

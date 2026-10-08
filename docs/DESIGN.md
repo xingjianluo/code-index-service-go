@@ -15,6 +15,9 @@ service` 七个包中。
   使后续所有步骤（日志、报告、快照指纹）与遍历顺序无关。
 - 默认剪枝 `.git / node_modules / .idea / .vscode`；默认收录常见源码扩展名
   （`.go .py .js ... .md .txt` 等，见 `source.DefaultIncludeExt`）。
+- 被扩展名规则排除的常规文件**不再静默丢弃**：`ScanWithExcluded` 把它们
+  一并上报，索引期由 `parser.InspectSkipped` 归类后写入快照的
+  `skipped` 列表（见 1.2 末尾），查询侧据此给出明确交代（见 5.1/5.2）。
 - 符号链接、设备、套接字等非常规文件不作为源文件；**根目录缺失或目录
   不可读返回错误**，不静默忽略。扫描阶段的 `Size` 仅作参考，所有硬性
   判定以解析时重新 `stat + read` 为准。
@@ -34,6 +37,20 @@ service` 七个包中。
 
 > 先大小后编码的顺序是刻意的：避免为超大文件做 UTF-8 扫描。Go 的解析
 > 建立在合法 UTF-8 之上，所以非法编码不会以“解析失败”的模糊面目出现。
+
+被扫描到但因扩展名未收录而未进入解析的文件，由 `parser.InspectSkipped`
+逐个归类写入快照 `skipped` 列表（同样不静默丢弃）：
+
+| 类别 | 触发条件 | 记录内容 |
+|---|---|---|
+| `extension_not_indexed` | 扩展名不在收录集合，内容是可分析文本 | 路径、大小、内容哈希、去重排序后的**原始标识符 token 列表**（大小写保留，供查询期判断名字是否出现） |
+| `non_text` | 内容不是可分析文本（含 NUL 字节或非法 UTF-8） | 路径、大小、内容哈希；不抽 token |
+
+判定细节：超过 `MaxFileSize` 的排除文件只检查有界前缀（32 KiB），此时
+token 列表标记 `tokens_truncated`（查询期按“不能排除名字存在”处理）；
+读取失败的排除文件仍然落账，错误写入 `detail`。同一文件状态重复索引
+得到逐字节一致的 skipped 记录；`skipped` 参与快照 ID 计算（仅当非空，
+因此没有排除文件的仓库快照 ID 与此特性引入前完全一致）。
 
 记录内容：
 
@@ -235,18 +252,36 @@ score = 3.00 * 标题命中次数
 结果逐字节一致（测试里用两次查询的 JSON 逐字节比较固定这一点）。
 定义列表本身按（路径、行号、类别、ID）固定排序输出。
 
+除两类出现位置外，输出还带一个独立的 `unanalyzed` 列表，专门交代**被
+扫描到但从未解析**的文件（见 1.2 的 `skipped` 记录），它们不含任何已
+解析出现，因此绝不混入 `resolved` / `unresolved`：
+
+- `extension_not_indexed` 且索引期 token 列表完整：名字在 token 中
+  ⇒ 列出，`name_present=yes`；名字可证明不在 ⇒ 该文件不出现；
+- `extension_not_indexed` 但 token 列表被截断/不可用：列出，
+  `name_present=unknown`（除非恰好命中，则为 `yes`）；
+- `non_text`：任何查询都列出，`name_present=unknown`（二进制内容无法
+  分析，不能排除名字以字节形式出现）。
+
+每条 `unanalyzed` 记录带类别与原因（`detail`），判定只依赖快照数据，
+不触碰磁盘，因此同样满足“同一快照重复查询结果逐字节一致”。
+
 ### 5.2 按改动文件算影响面（Impact）
 
 输入一组改动过的文件（仓库相对路径，归一化、去重、排序后处理，与调用
 顺序无关），输出：
 
-- `changed`：**每个**输入文件的明确归类，不静默丢弃：
+- `changed`：**每个**输入文件的明确归类，不静默丢弃，且“文件在仓库里
+  但没被当成代码分析”与“路径根本没被扫描到”严格分开：
   - `indexed`：在索引中，其定义的符号作为影响源；
   - `failed`：在索引失败列表中，原样带出失败类别与证据（如
-    `invalid_utf8`）——非常见后缀但落在收录扩展名内、内容又不是普通
-    文本的文件落在这里；
-  - `unknown`：不在索引中（扩展名被扫描规则排除、被剪枝、或根本不
-    存在），说明原因并标明“不贡献符号级影响”。
+    `invalid_utf8`）——扩展名落在收录集合内、内容却不是普通文本的
+    文件落在这里；
+  - `skipped`：被扫描到但因扩展名未收录而从未解析（`category` 进一步
+    区分 `extension_not_indexed` / `non_text`，`detail` 写明原因），
+    不贡献符号级影响；
+  - `unknown`：上次扫描根本没见到这个路径（写错了、已删除、或位于被
+    剪枝的目录），不贡献符号级影响。
 - `impacted`：直接受影响文件。判定规则：其它文件中的某条引用在索引期
   被解析到**改动文件中定义的符号**。每条影响带引用链
   `defines: 改动文件 -> 符号` + `references: 受影响文件:行 -> 符号`，
@@ -280,7 +315,7 @@ score = 3.00 * 标题命中次数
 | 字段 | 默认 | 含义 |
 |---|---|---|
 | `MaxDefinitions` | 64 | 一个名字纳入输出的定义数；超出按（路径、行号、类别、ID）截断，记 `max_definitions` |
-| `MaxReferences` | 500 | resolved / unresolved 每类各保留的出现数；超出按（路径、行、列）截断，记 `max_references` |
+| `MaxReferences` | 500 | resolved / unresolved 每类各保留的出现数；超出按（路径、行、列）截断，记 `max_references`；`unanalyzed` 列表复用同一数值上限，超出按路径序截断，记 `max_unanalyzed` |
 | `MaxImpacted` | 200 | impacted / suspected 每类各保留的文件数；超出按路径序截断，记 `max_impacted` |
 | `MaxChainEdges` | 8 | 每个受影响文件保留的引用链数（一条链对应一个依赖符号）；超出按符号名序截断，记 `max_chain_edges` |
 
@@ -312,6 +347,16 @@ go run ./cmd/codesearch refs   -store /tmp/ix -name YourSymbol
 go run ./cmd/codesearch impact -store /tmp/ix -files pkg/a.go,pkg/b.go
 # 纯改名演练：mv pkg/a.go pkg/b.go && 再次 index 后 refs 同一符号，
 # 观察 key 不变、路径敏感 id 变化、引用仍然 resolved
+
+# 非常见后缀 / 非文本文件演练（1.2、5.1、5.2）：
+#   echo 'mentions YourSymbol' > some-repo/tpl/page.tmpl
+#   printf '\x00\x01bin\xff' > some-repo/data/blob.dat
+#   重新 index 后：
+#   - refs -name YourSymbol 的 unanalyzed 区段列出 page.tmpl
+#     （extension_not_indexed, name_present=yes）与 blob.dat
+#     （non_text, name_present=unknown）
+#   - impact -files tpl/page.tmpl,data/blob.dat,ghost/nope.go 中三者分别
+#     归类为 skipped/extension_not_indexed、skipped/non_text、unknown
 
 go run ./cmd/codesearch serve -root ./some-repo -store /tmp/ix
 #   GET /refs?name=YourSymbol   GET /impact?files=pkg/a.go,pkg/b.go

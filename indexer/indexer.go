@@ -52,7 +52,7 @@ func (i *Indexer) Index(ctx context.Context, root string) (*model.Snapshot, *mod
 
 // indexWith is the incremental core (previous may be nil).
 func (i *Indexer) indexWith(ctx context.Context, root string, previous *model.Snapshot) (*model.Snapshot, *model.IndexReport, error) {
-	discovered, err := i.scanner.Scan()
+	discovered, excluded, err := i.scanner.ScanWithExcluded()
 	if err != nil {
 		return nil, nil, err
 	}
@@ -157,16 +157,30 @@ func (i *Indexer) indexWith(ctx context.Context, root string, previous *model.Sn
 	// deterministic and order-independent, so doing it for all files is safe.
 	i.parser.ResolveReferences(recordsOf(newFiles))
 
+	// Scanned-but-excluded files (unusual extension, non-text content) are
+	// recorded explicitly so relation queries can account for them instead of
+	// letting them vanish. Inspection is deterministic and content-based, so
+	// re-indexing an unchanged tree yields the identical skipped list.
+	skipped := make([]model.SkippedFile, 0, len(excluded))
+	for _, df := range excluded {
+		if err := ctx.Err(); err != nil {
+			return nil, nil, err
+		}
+		skipped = append(skipped, parser.InspectSkipped(df, i.parser.MaxFileSize()))
+	}
+	sort.Slice(skipped, func(a, b int) bool { return skipped[a].Path < skipped[b].Path })
+
 	sortFailures(failures)
 	snap := &model.Snapshot{
 		StoreFormat: model.StoreFormatV2,
 		IndexRules:  model.IndexRulesV2,
 		Files:       newFiles,
 		Failures:    failures,
+		Skipped:     skipped,
 		CreatedAt:   time.Now().UTC(),
 		Root:        root,
 	}
-	snap.ID = model.SnapshotID(snap.Files, snap.Failures)
+	snap.ID = model.SnapshotID(snap.Files, snap.Failures, snap.Skipped)
 	report.SnapshotID = snap.ID
 	report.Failed = failures
 	sortReport(report)

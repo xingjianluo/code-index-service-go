@@ -248,7 +248,7 @@ func TestImpactDirectAndChangedFileClassification(t *testing.T) {
 	})
 	snap, _ := indexOnce(t, newStack(t, root, storeDir), root)
 
-	changed := []string{"core/base.go", "bad/broken.go", "bin/blob.xyz"}
+	changed := []string{"core/base.go", "bad/broken.go", "bin/blob.xyz", "ghost/nope.go"}
 	out := mustImpact(t, snap, changed, relation.Limits{})
 	t.Logf("input: changed=%v", changed)
 	for _, c := range out.Changed {
@@ -265,8 +265,13 @@ func TestImpactDirectAndChangedFileClassification(t *testing.T) {
 	if status["bad/broken.go"].Status != "failed" || status["bad/broken.go"].Category != string(model.FailureInvalidUTF8) {
 		t.Fatalf("bad/broken.go should be failed/invalid_utf8, got %+v", status["bad/broken.go"])
 	}
-	if status["bin/blob.xyz"].Status != "unknown" {
-		t.Fatalf("bin/blob.xyz should be unknown (excluded extension), got %+v", status["bin/blob.xyz"])
+	// Scanned but excluded by extension: distinct from both indexed and unknown.
+	if status["bin/blob.xyz"].Status != "skipped" || status["bin/blob.xyz"].Category != "extension_not_indexed" {
+		t.Fatalf("bin/blob.xyz should be skipped/extension_not_indexed, got %+v", status["bin/blob.xyz"])
+	}
+	// Never seen by the scan at all: stays unknown, clearly separated from skipped.
+	if status["ghost/nope.go"].Status != "unknown" {
+		t.Fatalf("ghost/nope.go should be unknown (never scanned), got %+v", status["ghost/nope.go"])
 	}
 
 	if len(out.Impacted) != 1 || out.Impacted[0].Path != "app/user.go" {
@@ -374,4 +379,159 @@ func TestReferencesLimitsDeterministic(t *testing.T) {
 	if len(out.Truncated) != 1 || out.Truncated[0].Reason != "max_references" {
 		t.Fatalf("want one max_references truncation, got %+v", out.Truncated)
 	}
+}
+
+// Scanned-but-unanalyzed files (unusual extension, non-text content) must be
+// explicitly accounted for in a references answer: listed under their own
+// category with a clear reason, never mixed into resolved/unresolved, and
+// never silently absent.
+func TestReferencesUnanalyzedFilesClassified(t *testing.T) {
+	root, storeDir := writeRepo(t, map[string]string{
+		"defs/helper.go":      "package defs\n\nfunc Helper() {}\n",
+		"use/caller.go":       "package use\n\nfunc Call() {\n\tHelper()\n\tGhost()\n}\n",
+		"templates/page.tmpl": "<h1>{{ .Title }}</h1>\n<!-- rendered by Helper -->\n",
+		"data/blob.dat":       "\x00\x01binary Helper payload\xff\xfe\x00",
+		"assets/empty.inc":    "this text file never mentions the queried name\n",
+	})
+	idx := newStack(t, root, storeDir)
+	snap, _ := indexOnce(t, idx, root)
+
+	// Sanity: the two unusual files were scanned and recorded with distinct
+	// categories, not dropped.
+	skipped := map[string]model.SkippedFile{}
+	for _, sk := range snap.Skipped {
+		skipped[sk.Path] = sk
+		t.Logf("scanned-not-parsed: %s category=%s tokens=%d truncated=%v", sk.Path, sk.Category, len(sk.Tokens), sk.TokensTruncated)
+	}
+	if skipped["templates/page.tmpl"].Category != model.SkipExtensionNotIndexed {
+		t.Fatalf("page.tmpl should be extension_not_indexed, got %+v", skipped["templates/page.tmpl"])
+	}
+	if skipped["data/blob.dat"].Category != model.SkipNonText {
+		t.Fatalf("blob.dat should be non_text, got %+v", skipped["data/blob.dat"])
+	}
+
+	out := mustRefs(t, snap, "Helper", relation.Limits{})
+	t.Logf("input: name=Helper; judgment: parsed occurrences split resolved/unresolved as before;")
+	t.Logf("judgment: page.tmpl tokens contain Helper -> unanalyzed/name_present=yes; blob.dat non-text -> unanalyzed/name_present=unknown;")
+	t.Logf("judgment: empty.inc token list provably lacks Helper -> omitted from unanalyzed")
+	for _, u := range out.Unanalyzed {
+		t.Logf("unanalyzed %s category=%s name_present=%s", u.Path, u.Category, u.NamePresent)
+	}
+
+	// Existing classes are untouched: same resolved/unresolved as before the
+	// feature, and no skipped path leaks into them.
+	if len(out.Resolved) != 2 || len(out.Unresolved) != 0 {
+		t.Fatalf("resolved/unresolved must stay 2/0, got resolved=%+v unresolved=%+v", out.Resolved, out.Unresolved)
+	}
+	for _, h := range append(append([]relation.ReferenceHit{}, out.Resolved...), out.Unresolved...) {
+		if h.Path == "templates/page.tmpl" || h.Path == "data/blob.dat" || h.Path == "assets/empty.inc" {
+			t.Fatalf("unanalyzed file leaked into occurrence lists: %+v", h)
+		}
+	}
+
+	un := map[string]relation.UnanalyzedFile{}
+	for _, u := range out.Unanalyzed {
+		un[u.Path] = u
+	}
+	if got := un["templates/page.tmpl"]; got.Category != "extension_not_indexed" || got.NamePresent != "yes" {
+		t.Fatalf("page.tmpl: want extension_not_indexed/yes, got %+v", got)
+	}
+	if got := un["data/blob.dat"]; got.Category != "non_text" || got.NamePresent != "unknown" {
+		t.Fatalf("blob.dat: want non_text/unknown, got %+v", got)
+	}
+	if _, present := un["assets/empty.inc"]; present {
+		t.Fatalf("empty.inc provably lacks the name and must be omitted, got %+v", un["assets/empty.inc"])
+	}
+
+	// A name that does not occur in the text file: page.tmpl drops out, the
+	// non-text file stays (its content cannot be ruled out).
+	ghost := mustRefs(t, snap, "Ghost", relation.Limits{})
+	t.Logf("input: name=Ghost; judgment: page.tmpl tokens provably lack Ghost -> omitted; blob.dat stays unknown")
+	if len(ghost.Unresolved) != 1 {
+		t.Fatalf("Ghost: want 1 unresolved occurrence, got %+v", ghost.Unresolved)
+	}
+	ghostUn := map[string]relation.UnanalyzedFile{}
+	for _, u := range ghost.Unanalyzed {
+		ghostUn[u.Path] = u
+	}
+	if _, present := ghostUn["templates/page.tmpl"]; present {
+		t.Fatalf("page.tmpl provably lacks Ghost and must be omitted, got %+v", ghostUn["templates/page.tmpl"])
+	}
+	if got := ghostUn["data/blob.dat"]; got.NamePresent != "unknown" {
+		t.Fatalf("blob.dat must stay listed as unknown for any name, got %+v", got)
+	}
+
+	// Determinism: same snapshot, repeated and reordered queries -> identical
+	// output, including the unanalyzed section; and the answer survives a
+	// store round-trip byte-for-byte.
+	b1, _ := json.Marshal(mustRefs(t, snap, "Helper", relation.Limits{}))
+	b2, _ := json.Marshal(mustRefs(t, snap, "Helper", relation.Limits{}))
+	if string(b1) != string(b2) {
+		t.Fatalf("repeated query differs:\n%s\n%s", b1, b2)
+	}
+	st, err := store.New(storeDir)
+	if err != nil {
+		t.Fatalf("store new: %v", err)
+	}
+	loaded, err := st.Load(t.Context())
+	if err != nil {
+		t.Fatalf("store load: %v", err)
+	}
+	b3, _ := json.Marshal(mustRefs(t, loaded, "Helper", relation.Limits{}))
+	if string(b1) != string(b3) {
+		t.Fatalf("store round-trip changed the answer:\n%s\n%s", b1, b3)
+	}
+	t.Logf("determinism: repeated query and post-reload query identical (%d-byte JSON)", len(b1))
+}
+
+// Impact must distinguish a changed file that exists in the repo but was
+// never parsed (skipped: extension_not_indexed / non_text) from a path the
+// scan never saw (unknown) — different status, different reason — while the
+// impact computation itself is unchanged.
+func TestImpactSkippedDistinctFromUnknown(t *testing.T) {
+	root, storeDir := writeRepo(t, map[string]string{
+		"core/base.go":        "package core\n\nfunc Base() {}\n",
+		"app/user.go":         "package app\n\nfunc Run() {\n\tBase()\n}\n",
+		"templates/page.tmpl": "<h1>{{ .Title }}</h1>\n",
+		"data/blob.dat":       "\x00\x01binary\xff\xfe\x00",
+	})
+	snap, _ := indexOnce(t, newStack(t, root, storeDir), root)
+
+	changed := []string{"core/base.go", "templates/page.tmpl", "data/blob.dat", "ghost/nope.go"}
+	out := mustImpact(t, snap, changed, relation.Limits{})
+	t.Logf("input: changed=%v", changed)
+	for _, c := range out.Changed {
+		t.Logf("changed file %s -> status=%s category=%s (%s)", c.Path, c.Status, c.Category, c.Detail)
+	}
+
+	status := map[string]relation.ChangedFileStatus{}
+	for _, c := range out.Changed {
+		status[c.Path] = c
+	}
+	if got := status["templates/page.tmpl"]; got.Status != "skipped" || got.Category != "extension_not_indexed" {
+		t.Fatalf("page.tmpl: want skipped/extension_not_indexed, got %+v", got)
+	}
+	if got := status["data/blob.dat"]; got.Status != "skipped" || got.Category != "non_text" {
+		t.Fatalf("blob.dat: want skipped/non_text, got %+v", got)
+	}
+	if got := status["ghost/nope.go"]; got.Status != "unknown" {
+		t.Fatalf("ghost/nope.go: want unknown (never scanned), got %+v", got)
+	}
+	if got := status["core/base.go"]; got.Status != "indexed" {
+		t.Fatalf("core/base.go: want indexed, got %+v", got)
+	}
+	// The two skipped files and the unknown path contribute no impact, and
+	// the real dependency is still found exactly as before.
+	if len(out.Impacted) != 1 || out.Impacted[0].Path != "app/user.go" {
+		t.Fatalf("impact computation must be unaffected: want app/user.go, got %+v", out.Impacted)
+	}
+
+	// Determinism: same inputs in a different order give the identical answer.
+	again := mustImpact(t, snap, []string{"ghost/nope.go", "data/blob.dat", "core/base.go", "templates/page.tmpl"}, relation.Limits{})
+	b1, _ := json.Marshal(out)
+	b2, _ := json.Marshal(again)
+	if string(b1) != string(b2) {
+		t.Fatalf("reordered changed-file input changed the answer:\n%s\n%s", b1, b2)
+	}
+	t.Logf("determinism: reordered input produced identical %d-byte JSON", len(b1))
 }

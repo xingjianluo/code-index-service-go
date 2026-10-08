@@ -34,8 +34,11 @@ type dep struct {
 //     Occurrences bound to a definition in the SAME file are provably
 //     unaffected (same-file wins regardless of other files) and excluded.
 //   - Changed files that failed indexing keep their typed failure category;
-//     changed files absent from the index are reported as "unknown". Neither
-//     is silently dropped.
+//     changed files the scan saw but never parsed are reported as "skipped"
+//     with their skip category (extension_not_indexed / non_text); changed
+//     files the scan never saw at all are "unknown" (wrong path, deleted, or
+//     under a pruned directory). None is silently dropped, and "skipped" is
+//     never conflated with "unknown".
 //
 // Determinism: changed inputs are normalized, deduped and sorted; files and
 // references are visited in (path, line, column) order; all caps cut a
@@ -69,6 +72,10 @@ func (e *Engine) Impact(ctx context.Context, snap *model.Snapshot, changedFiles 
 	for _, f := range snap.Failures {
 		failedByPath[f.Path] = f
 	}
+	skippedByPath := make(map[string]model.SkippedFile, len(snap.Skipped))
+	for _, sk := range snap.Skipped {
+		skippedByPath[sk.Path] = sk
+	}
 
 	// Classify every changed file explicitly.
 	changedSet := make(map[string]bool, len(changed))
@@ -82,10 +89,16 @@ func (e *Engine) Impact(ctx context.Context, snap *model.Snapshot, changedFiles 
 			out.Changed = append(out.Changed, ChangedFileStatus{
 				Path: p, Status: "failed", Category: string(f.Category), Detail: f.Message,
 			})
+		case skippedByPath[p].Path != "":
+			sk := skippedByPath[p]
+			out.Changed = append(out.Changed, ChangedFileStatus{
+				Path: p, Status: "skipped", Category: string(sk.Category),
+				Detail: sk.Detail + "; contributes no symbol-based impact",
+			})
 		default:
 			out.Changed = append(out.Changed, ChangedFileStatus{
 				Path: p, Status: "unknown",
-				Detail: "not present in index (excluded by scan rules, pruned, or does not exist); contributes no symbol-based impact",
+				Detail: "path not seen during the last scan (does not exist, was deleted since, or lives under a pruned directory); contributes no symbol-based impact",
 			})
 		}
 	}
@@ -160,11 +173,14 @@ func (e *Engine) Impact(ctx context.Context, snap *model.Snapshot, changedFiles 
 	out.Suspected = buildImpacted(suspected, true, l, &out.Truncated)
 
 	out.Notes = append(out.Notes, fmt.Sprintf(
-		"changed=%d indexed=%d source_symbols=%d impacted=%d suspected=%d limits={impacted:%d chainsPerFile:%d}",
-		len(changed), countStatus(out.Changed, "indexed"), len(sources),
+		"changed=%d indexed=%d skipped=%d unknown=%d source_symbols=%d impacted=%d suspected=%d limits={impacted:%d chainsPerFile:%d}",
+		len(changed), countStatus(out.Changed, "indexed"), countStatus(out.Changed, "skipped"),
+		countStatus(out.Changed, "unknown"), len(sources),
 		len(out.Impacted), len(out.Suspected), l.MaxImpacted, l.MaxChainEdges))
 	out.Notes = append(out.Notes,
 		"rule: direct = reference resolved at index time to a symbol defined in a changed file; suspected = same-name occurrence bound to a definition in another unchanged file (attribution may shift)")
+	out.Notes = append(out.Notes,
+		"changed-file classes: indexed (parsed) / failed (typed index failure) / skipped (scanned but never parsed: extension_not_indexed or non_text) / unknown (never seen by the scan)")
 	return out, nil
 }
 

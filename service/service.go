@@ -100,6 +100,17 @@ func (s *Service) CurrentFailures() []model.Failure {
 	return nil
 }
 
+// CurrentSkipped returns the scanned-but-not-parsed files recorded in the
+// active snapshot.
+func (s *Service) CurrentSkipped() []model.SkippedFile {
+	if snap := s.current.Load(); snap != nil {
+		out := make([]model.SkippedFile, len(snap.Skipped))
+		copy(out, snap.Skipped)
+		return out
+	}
+	return nil
+}
+
 // References answers "where is name referenced" on the currently published
 // snapshot (captured once, so the answer is consistent even if a reindex
 // commits mid-query).

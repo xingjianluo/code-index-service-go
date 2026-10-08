@@ -63,6 +63,19 @@ type ReferenceHit struct {
 	TargetLine int    `json:"target_line,omitempty"`
 }
 
+// UnanalyzedFile accounts for one scanned-but-never-parsed file in a
+// references answer, so unusual-extension or non-text files never vanish
+// silently. NamePresent is "yes" (the name provably occurs, from the
+// index-time token list) or "unknown" (non-text content or a truncated /
+// unavailable token list; the name may still occur). Files whose recorded
+// tokens provably do NOT contain the name are omitted entirely.
+type UnanalyzedFile struct {
+	Path        string `json:"path"`
+	Category    string `json:"category"`     // "extension_not_indexed" | "non_text"
+	NamePresent string `json:"name_present"` // "yes" | "unknown"
+	Detail      string `json:"detail"`
+}
+
 // ReferencesOutcome is the complete answer to "where is NAME referenced".
 type ReferencesOutcome struct {
 	Name        string           `json:"name"`
@@ -70,8 +83,12 @@ type ReferencesOutcome struct {
 	Definitions []DefinitionView `json:"definitions"` // every definition of the name, deterministic order
 	Resolved    []ReferenceHit   `json:"resolved"`    // occurrences bound to a definition
 	Unresolved  []ReferenceHit   `json:"unresolved"`  // name occurrences with no definition found
-	Truncated   []Truncation     `json:"truncated"`
-	Notes       []string         `json:"notes"`
+	// Unanalyzed lists scanned-but-not-parsed files relevant to this name,
+	// each with its skip category. Kept strictly separate from Resolved and
+	// Unresolved: nothing here is a parsed occurrence.
+	Unanalyzed []UnanalyzedFile `json:"unanalyzed"`
+	Truncated  []Truncation     `json:"truncated"`
+	Notes      []string         `json:"notes"`
 }
 
 // Edge is one hop in an impact explanation chain.
@@ -93,8 +110,8 @@ type ImpactedFile struct {
 // or non-text files are never silently dropped.
 type ChangedFileStatus struct {
 	Path     string `json:"path"`
-	Status   string `json:"status"`             // "indexed" | "failed" | "unknown"
-	Category string `json:"category,omitempty"` // failure category when Status=="failed"
+	Status   string `json:"status"`             // "indexed" | "failed" | "skipped" | "unknown"
+	Category string `json:"category,omitempty"` // failure/skip category when Status is "failed"/"skipped"
 	Detail   string `json:"detail,omitempty"`
 }
 

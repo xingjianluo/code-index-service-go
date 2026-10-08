@@ -24,9 +24,14 @@
   `ErrBudgetUnsatisfiable`，绝不静默截断成空/无效结果。
 - **符号关系追踪**：按符号查引用（resolved/unresolved 严格分列，同名多定义
   归属采用索引期固定规则，重复查询结果一致）；按改动文件算影响面（每条影响
-  带引用链，改动文件逐个明确归类：indexed/failed/unknown）；纯改名不改内容时
-  符号凭改名稳定键（StableSymbolKey）保持连续，引用关系不断；所有上限确定性
-  截断并记录原因。
+  带引用链，改动文件逐个明确归类：indexed/failed/skipped/unknown）；纯改名
+  不改内容时符号凭改名稳定键（StableSymbolKey）保持连续，引用关系不断；
+  所有上限确定性截断并记录原因。
+- **非常见后缀/非文本文件不失联**：扫描时被扩展名规则排除的文件（如
+  `.dat/.tmpl/.inc`）同样落账为可区分的跳过类别（`extension_not_indexed /
+  non_text`）并参与快照指纹；查引用时在独立的 `unanalyzed` 区段列出并写明
+  原因（文本文件还会基于索引期留存的标识符判断名字是否出现），算影响面时
+  与“路径根本不存在”（unknown）明确分开。
 - **并发一致**：快照不可变，服务用原子指针发布；检索永远看到完整的旧快照
   或完整的新快照，不会读到半更新或新旧混合状态；索引写串行化。
 - **可复现测试**：覆盖增量/重命名、异常或缺字段输入、版本差异、并发读写；
@@ -72,8 +77,14 @@ go run ./cmd/codesearch serve -root ./path/to/repo -store ./tmpidx -addr 127.0.0
 #   GET /search?q=...  GET /refs?name=...  GET /impact?files=a.go,b.go
 ```
 
-`index` 输出中 `+ ~ - > !` 分别表示新增、修改、删除、重命名、失败；
-失败行带方括号类别与具体证据（大小、解析器位置/文本）。
+`index` 输出中 `+ ~ - > !` 分别表示新增、修改、删除、重命名、失败，
+`* [category] path` 行（计入 `skipped=N`）表示被扫描到但因扩展名
+未收录而未解析的文件；失败行带方括号类别与具体证据（大小、解析器位置/文本）。
+
+`refs` 输出末尾的 `unanalyzed files` 区段列出被扫描到但从未解析的相关文件
+（`extension_not_indexed` / `non_text`，`name_present=yes/unknown`）；
+`impact` 的改动文件归类中 `skipped`（在仓库里但未解析）与 `unknown`
+（扫描根本没见到）是两个独立类别。
 
 ## 本地验证
 

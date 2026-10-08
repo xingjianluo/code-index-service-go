@@ -248,7 +248,7 @@ func TestImpactDirectAndChangedFileClassification(t *testing.T) {
 	})
 	snap, _ := indexOnce(t, newStack(t, root, storeDir), root)
 
-	changed := []string{"core/base.go", "bad/broken.go", "bin/blob.xyz"}
+	changed := []string{"core/base.go", "bad/broken.go", "bin/blob.xyz", "no/such/file.go"}
 	out := mustImpact(t, snap, changed, relation.Limits{})
 	t.Logf("input: changed=%v", changed)
 	for _, c := range out.Changed {
@@ -265,8 +265,13 @@ func TestImpactDirectAndChangedFileClassification(t *testing.T) {
 	if status["bad/broken.go"].Status != "failed" || status["bad/broken.go"].Category != string(model.FailureInvalidUTF8) {
 		t.Fatalf("bad/broken.go should be failed/invalid_utf8, got %+v", status["bad/broken.go"])
 	}
-	if status["bin/blob.xyz"].Status != "unknown" {
-		t.Fatalf("bin/blob.xyz should be unknown (excluded extension), got %+v", status["bin/blob.xyz"])
+	// In-repo but never analyzed (extension not collected): distinct class.
+	if status["bin/blob.xyz"].Status != "skipped" || status["bin/blob.xyz"].Category != "excluded_extension" {
+		t.Fatalf("bin/blob.xyz should be skipped/excluded_extension, got %+v", status["bin/blob.xyz"])
+	}
+	// Never seen by the indexer at all: a different, clearly separable class.
+	if status["no/such/file.go"].Status != "unknown" {
+		t.Fatalf("no/such/file.go should be unknown (path never seen), got %+v", status["no/such/file.go"])
 	}
 
 	if len(out.Impacted) != 1 || out.Impacted[0].Path != "app/user.go" {

@@ -23,6 +23,7 @@ func toEnvelope(snap *model.Snapshot) *envelope {
 		CreatedAt:   snap.CreatedAt.UTC().Format(time.RFC3339Nano),
 		Files:       make(map[string]*fileEnvelope, len(snap.Files)),
 		Failures:    snap.Failures,
+		Skipped:     snap.Skipped,
 	}
 	for path, rec := range snap.Files {
 		fe := &fileEnvelope{
@@ -58,6 +59,7 @@ func fromEnvelope(env *envelope) *model.Snapshot {
 		Root:        env.Root,
 		Files:       make(map[string]*model.FileRecord, len(env.Files)),
 		Failures:    env.Failures,
+		Skipped:     env.Skipped,
 		Extra:       nil,
 	}
 	if t, err := time.Parse(time.RFC3339Nano, env.CreatedAt); err == nil {
@@ -88,6 +90,9 @@ func fromEnvelope(env *envelope) *model.Snapshot {
 	}
 	if snap.Failures == nil {
 		snap.Failures = []model.Failure{}
+	}
+	if snap.Skipped == nil {
+		snap.Skipped = []model.SkippedFile{}
 	}
 	return snap
 }

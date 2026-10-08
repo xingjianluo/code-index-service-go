@@ -218,6 +218,10 @@ func runRefs(args []string) error {
 	for _, h := range out.Unresolved {
 		fmt.Printf("  ?  %s:%d:%d\n", h.Path, h.Line, h.Column)
 	}
+	fmt.Printf("unanalyzed files (%d):\n", len(out.Unanalyzed))
+	for _, u := range out.Unanalyzed {
+		fmt.Printf("  !  %s [%s] %s\n", u.Path, u.Category, u.Detail)
+	}
 	for _, t := range out.Truncated {
 		fmt.Printf("~ truncation[%s] %s\n", t.Reason, t.Detail)
 	}

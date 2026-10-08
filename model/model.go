@@ -28,6 +28,16 @@ const (
 	FailureMissing     FailureCategory = "missing"      // scan saw the file but read found it gone
 )
 
+// Skip reasons. A file the scanner saw but never handed to the parser is
+// recorded under one of these reasons instead of vanishing without a trace.
+type SkipReason string
+
+const (
+	// SkipExcludedExtension: the file's extension is not in the configured
+	// include set, so its content was never read or analyzed.
+	SkipExcludedExtension SkipReason = "excluded_extension"
+)
+
 // Content identity ------------------------------------------------------------
 
 // Failure records a rejected input with a distinguishable reason.
@@ -36,6 +46,16 @@ type Failure struct {
 	Category FailureCategory `json:"category"`
 	Message  string          `json:"message"`
 	Size     int64           `json:"size"`
+}
+
+// SkippedFile records a scanned-but-never-analyzed file. Unlike a Failure
+// (the file was read and rejected), a skipped file's content was never
+// inspected at all, so nothing is known about its symbols or references.
+type SkippedFile struct {
+	Path   string     `json:"path"`
+	Reason SkipReason `json:"reason"`
+	Detail string     `json:"detail"`
+	Size   int64      `json:"size"`
 }
 
 // SymbolKind enumerates extracted symbol kinds.
@@ -103,6 +123,7 @@ type Snapshot struct {
 	IndexRules  int                    `json:"index_rules"`
 	Files       map[string]*FileRecord `json:"files"`
 	Failures    []Failure              `json:"failures"`
+	Skipped     []SkippedFile          `json:"skipped"`
 	CreatedAt   time.Time              `json:"created_at"`
 	Root        string                 `json:"root"`
 	Extra       map[string]any         `json:"-"` // unknown envelope fields, rejected on load

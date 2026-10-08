@@ -27,11 +27,11 @@ func TestScanDeterministicAndFilters(t *testing.T) {
 	mk("readme.md", "# hi")
 
 	sc := source.NewScanner(source.Options{Root: root})
-	files1, err := sc.Scan()
+	files1, excluded1, err := sc.Scan()
 	if err != nil {
 		t.Fatalf("scan: %v", err)
 	}
-	files2, err := sc.Scan()
+	files2, excluded2, err := sc.Scan()
 	if err != nil {
 		t.Fatalf("scan2: %v", err)
 	}
@@ -49,11 +49,21 @@ func TestScanDeterministicAndFilters(t *testing.T) {
 			t.Fatalf("scan order nondeterministic or wrong: %v / %v", rels, want)
 		}
 	}
+	// Files outside the include set are reported, not dropped silently.
+	t.Logf("input: a/skip.me has unlisted extension .me; judgment: excluded_extension")
+	if len(excluded1) != 1 || excluded1[0].RelPath != "a/skip.me" ||
+		excluded1[0].Reason != source.ReasonExcludedExtension {
+		t.Fatalf("excluded: want [a/skip.me excluded_extension], got %+v", excluded1)
+	}
+	if len(excluded2) != 1 || excluded2[0].RelPath != "a/skip.me" {
+		t.Fatalf("excluded list must be deterministic across scans: %+v / %+v", excluded1, excluded2)
+	}
+	t.Logf("excluded %s reason=%s size=%d", excluded1[0].RelPath, excluded1[0].Reason, excluded1[0].Size)
 }
 
 func TestScanMissingRootIsError(t *testing.T) {
 	sc := source.NewScanner(source.Options{Root: filepath.Join(t.TempDir(), "nope")})
-	if _, err := sc.Scan(); err == nil {
+	if _, _, err := sc.Scan(); err == nil {
 		t.Fatal("missing root must return an error, not an empty file list")
 	} else {
 		t.Logf("missing root rejected: %v", err)

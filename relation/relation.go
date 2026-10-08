@@ -63,6 +63,19 @@ type ReferenceHit struct {
 	TargetLine int    `json:"target_line,omitempty"`
 }
 
+// UnanalyzedFile is a repository file the indexer saw but never analyzed,
+// so occurrences of the queried name inside it (if any) can never appear in
+// Resolved or Unresolved. It is listed explicitly — with the reason it was
+// not analyzed — instead of vanishing from the answer.
+type UnanalyzedFile struct {
+	Path string `json:"path"`
+	// Category is "excluded_extension" (scanner saw it, extension outside the
+	// include set, content never read) or a failure category such as
+	// "invalid_utf8" (content read but not analyzable text).
+	Category string `json:"category"`
+	Detail   string `json:"detail"`
+}
+
 // ReferencesOutcome is the complete answer to "where is NAME referenced".
 type ReferencesOutcome struct {
 	Name        string           `json:"name"`
@@ -70,6 +83,7 @@ type ReferencesOutcome struct {
 	Definitions []DefinitionView `json:"definitions"` // every definition of the name, deterministic order
 	Resolved    []ReferenceHit   `json:"resolved"`    // occurrences bound to a definition
 	Unresolved  []ReferenceHit   `json:"unresolved"`  // name occurrences with no definition found
+	Unanalyzed  []UnanalyzedFile `json:"unanalyzed"`  // scanned-but-not-analyzed files; occurrences there are unknowable
 	Truncated   []Truncation     `json:"truncated"`
 	Notes       []string         `json:"notes"`
 }
@@ -92,9 +106,12 @@ type ImpactedFile struct {
 // ChangedFileStatus explains how one input path was classified, so unusual
 // or non-text files are never silently dropped.
 type ChangedFileStatus struct {
-	Path     string `json:"path"`
-	Status   string `json:"status"`             // "indexed" | "failed" | "unknown"
-	Category string `json:"category,omitempty"` // failure category when Status=="failed"
+	Path   string `json:"path"`
+	Status string `json:"status"` // "indexed" | "failed" | "skipped" | "unknown"
+	// Category is the failure category when Status=="failed" (e.g.
+	// "invalid_utf8") or the skip reason when Status=="skipped"
+	// ("excluded_extension").
+	Category string `json:"category,omitempty"`
 	Detail   string `json:"detail,omitempty"`
 }
 

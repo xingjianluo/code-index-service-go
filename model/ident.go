@@ -61,9 +61,10 @@ func StableChunkID(path string, startLine, endLine int, fileContentHash, chunkCo
 }
 
 // SnapshotID derives a deterministic identity from the indexed state.
-// File paths are sorted; failures are included so that identical inputs
-// (including identical bad inputs) yield identical IDs.
-func SnapshotID(files map[string]*FileRecord, failures []Failure) string {
+// File paths are sorted; failures and skipped files are included so that
+// identical inputs (including identical bad or unanalyzed inputs) yield
+// identical IDs.
+func SnapshotID(files map[string]*FileRecord, failures []Failure, skipped []SkippedFile) string {
 	paths := make([]string, 0, len(files))
 	for p := range files {
 		paths = append(paths, p)
@@ -92,6 +93,21 @@ func SnapshotID(files map[string]*FileRecord, failures []Failure) string {
 		b.WriteString(fl.Path)
 		b.WriteByte(0)
 		b.WriteString(fl.Message)
+		b.WriteByte(0)
+	}
+	// Deterministic skipped-file contribution.
+	sortedSkipped := make([]SkippedFile, len(skipped))
+	copy(sortedSkipped, skipped)
+	sort.SliceStable(sortedSkipped, func(i, j int) bool {
+		if sortedSkipped[i].Path != sortedSkipped[j].Path {
+			return sortedSkipped[i].Path < sortedSkipped[j].Path
+		}
+		return sortedSkipped[i].Reason < sortedSkipped[j].Reason
+	})
+	for _, sk := range sortedSkipped {
+		b.WriteString(string(sk.Reason))
+		b.WriteByte(0)
+		b.WriteString(sk.Path)
 		b.WriteByte(0)
 	}
 	return shortHash("snap", b.String())

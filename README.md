@@ -24,9 +24,15 @@
   `ErrBudgetUnsatisfiable`，绝不静默截断成空/无效结果。
 - **符号关系追踪**：按符号查引用（resolved/unresolved 严格分列，同名多定义
   归属采用索引期固定规则，重复查询结果一致）；按改动文件算影响面（每条影响
-  带引用链，改动文件逐个明确归类：indexed/failed/unknown）；纯改名不改内容时
-  符号凭改名稳定键（StableSymbolKey）保持连续，引用关系不断；所有上限确定性
-  截断并记录原因。
+  带引用链，改动文件逐个明确归类：indexed/failed/skipped/unknown）；纯改名
+  不改内容时符号凭改名稳定键（StableSymbolKey）保持连续，引用关系不断；
+  所有上限确定性截断并记录原因。
+- **非常见后缀/非文本文件不凭空消失**：扩展名不在收录集合的文件（如
+  `.dat/.tmpl/.inc`）在扫描时记入快照 `skipped` 列表（内容从未读取）；
+  内容不是可分析文本的文件进入 `failures`（如 `invalid_utf8`）。查引用时
+  这些文件在 `unanalyzed` 清单中逐个列出并写明类别与原因；算影响面时
+  它们分别归类为 `skipped`/`failed`，与“路径根本不存在”的 `unknown`
+  一眼可分。
 - **并发一致**：快照不可变，服务用原子指针发布；检索永远看到完整的旧快照
   或完整的新快照，不会读到半更新或新旧混合状态；索引写串行化。
 - **可复现测试**：覆盖增量/重命名、异常或缺字段输入、版本差异、并发读写；
@@ -37,12 +43,12 @@
 | 包 | 职责 |
 |---|---|
 | `model` | 核心数据模型、版本常量、稳定标识/指纹规则 |
-| `source` | 本地文件系统扫描（模拟代码来源），确定性顺序，坏目录显式报错 |
+| `source` | 本地文件系统扫描（模拟代码来源），确定性顺序，坏目录显式报错，扩展名未收录的文件进入显式排除清单 |
 | `parser` | 读取校验与失败分类、Go AST 解析、文本归一、v2 分词、跨文件引用解析、v1→v2 迁移 |
 | `store` | 版本化信封、未知字段/版本拒绝、临时文件 fsync+rename 原子写入、完整性校验 |
 | `indexer` | 两遍式增量索引（解析→1:1 重命名判定→增删改归类→引用解析→原子提交） |
 | `retrieval` | 确定性打分排序、预算装配、可解释截断、零准入显式失败 |
-| `relation` | 按符号查引用（resolved/unresolved 分列）、按改动文件算影响面（带引用链）、改名稳定键、确定性上限取舍 |
+| `relation` | 按符号查引用（resolved/unresolved 分列 + 未分析文件 unanalyzed 清单）、按改动文件算影响面（带引用链，indexed/failed/skipped/unknown 归类）、改名稳定键、确定性上限取舍 |
 | `service` | 不可变快照的原子发布、读写并发编排、索引串行化 |
 | `cmd/codesearch` | `index` / `search` / `refs` / `impact` / `serve` 本地命令行入口 |
 
@@ -80,6 +86,10 @@ go run ./cmd/codesearch serve -root ./path/to/repo -store ./tmpidx -addr 127.0.0
 ```bash
 # 全量单测（含关键输入与判定日志）
 go test ./... -v
+
+# 非常见后缀/非文本文件的归类专项（引用侧 unanalyzed、影响面侧
+# skipped/failed/unknown 区分、确定性）
+go test ./relation/ -run 'Unanalyzed|Distinguishes' -v
 
 # 竞态检测（重点并发用例在 service 包）
 go test -race ./...

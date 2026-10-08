@@ -52,9 +52,22 @@ func (i *Indexer) Index(ctx context.Context, root string) (*model.Snapshot, *mod
 
 // indexWith is the incremental core (previous may be nil).
 func (i *Indexer) indexWith(ctx context.Context, root string, previous *model.Snapshot) (*model.Snapshot, *model.IndexReport, error) {
-	discovered, err := i.scanner.Scan()
+	discovered, excluded, err := i.scanner.Scan()
 	if err != nil {
 		return nil, nil, err
+	}
+
+	// Files the scanner saw but did not select (e.g. extension outside the
+	// include set) are recorded verbatim so relation queries can account for
+	// them explicitly instead of the files vanishing from every answer.
+	skipped := make([]model.SkippedFile, 0, len(excluded))
+	for _, ex := range excluded {
+		skipped = append(skipped, model.SkippedFile{
+			Path:   ex.RelPath,
+			Reason: model.SkipReason(ex.Reason),
+			Detail: "extension not in the configured include set; content never read or analyzed",
+			Size:   ex.Size,
+		})
 	}
 
 	var oldFiles map[string]*model.FileRecord
@@ -163,10 +176,11 @@ func (i *Indexer) indexWith(ctx context.Context, root string, previous *model.Sn
 		IndexRules:  model.IndexRulesV2,
 		Files:       newFiles,
 		Failures:    failures,
+		Skipped:     skipped,
 		CreatedAt:   time.Now().UTC(),
 		Root:        root,
 	}
-	snap.ID = model.SnapshotID(snap.Files, snap.Failures)
+	snap.ID = model.SnapshotID(snap.Files, snap.Failures, snap.Skipped)
 	report.SnapshotID = snap.ID
 	report.Failed = failures
 	sortReport(report)

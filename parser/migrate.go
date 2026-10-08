@@ -45,6 +45,6 @@ func MigrateV1ToV2(snap *model.Snapshot) error {
 	}
 	snap.StoreFormat = model.StoreFormatV2
 	snap.IndexRules = model.IndexRulesV2
-	snap.ID = model.SnapshotID(snap.Files, snap.Failures)
+	snap.ID = model.SnapshotID(snap.Files, snap.Failures, snap.Skipped)
 	return nil
 }

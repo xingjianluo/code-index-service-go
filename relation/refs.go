@@ -55,6 +55,7 @@ func (e *Engine) References(ctx context.Context, snap *model.Snapshot, name stri
 		Definitions: []DefinitionView{},
 		Resolved:    []ReferenceHit{},
 		Unresolved:  []ReferenceHit{},
+		Unanalyzed:  unanalyzedFiles(snap),
 		Truncated:   []Truncation{},
 		Notes:       []string{},
 	}
@@ -142,10 +143,46 @@ func (e *Engine) References(ctx context.Context, snap *model.Snapshot, name stri
 	}
 
 	out.Notes = append(out.Notes, fmt.Sprintf(
-		"name=%q definitions=%d resolved=%d unresolved=%d limits={definitions:%d references:%d}",
+		"name=%q definitions=%d resolved=%d unresolved=%d unanalyzed_files=%d limits={definitions:%d references:%d}",
 		name, len(out.Definitions), len(out.Resolved), len(out.Unresolved),
-		l.MaxDefinitions, l.MaxReferences))
+		len(out.Unanalyzed), l.MaxDefinitions, l.MaxReferences))
 	out.Notes = append(out.Notes,
 		"attribution: fixed at index time (same-file definition wins, then kind priority func<type<method<var<const<field, then path, line); query never re-decides")
+	if len(out.Unanalyzed) > 0 {
+		out.Notes = append(out.Notes,
+			"unanalyzed: files the index saw but never analyzed (extension not collected, or content not analyzable text); occurrences of the name inside them are unknowable and therefore absent from both resolved and unresolved")
+	}
 	return out, nil
+}
+
+// unanalyzedFiles lists every file the indexer saw but never analyzed, in
+// deterministic (path, category) order. Two sources, kept distinguishable by
+// category:
+//   - snap.Skipped: scanned but never read (e.g. extension outside the
+//     include set) — category is the skip reason;
+//   - snap.Failures: read but rejected (e.g. content not valid UTF-8) —
+//     category is the failure category.
+func unanalyzedFiles(snap *model.Snapshot) []UnanalyzedFile {
+	out := make([]UnanalyzedFile, 0, len(snap.Skipped)+len(snap.Failures))
+	for _, sk := range snap.Skipped {
+		out = append(out, UnanalyzedFile{
+			Path:     sk.Path,
+			Category: string(sk.Reason),
+			Detail:   sk.Detail,
+		})
+	}
+	for _, f := range snap.Failures {
+		out = append(out, UnanalyzedFile{
+			Path:     f.Path,
+			Category: string(f.Category),
+			Detail:   f.Message,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Path != out[j].Path {
+			return out[i].Path < out[j].Path
+		}
+		return out[i].Category < out[j].Category
+	})
+	return out
 }
